@@ -1,0 +1,391 @@
+{% extends "layout.html" %}
+{% block title %}ThomCreates — Scene Studio{% endblock %}
+
+{% block content %}
+
+<!-- ── Hero ───────────────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="hero-bg">
+    <div class="hero-grain"></div>
+    <div class="hero-glow"></div>
+  </div>
+  <div class="hero-content animate-fade-up">
+    <p class="hero-eyebrow">
+      <span class="eyebrow-dot"></span> AI Visual Storytelling · Tatterveil Style
+    </p>
+    <h1 class="hero-title">
+      Transform Scripts<br />into <span class="hero-accent">Cinematic Scenes</span>
+    </h1>
+    <p class="hero-desc">
+      Paste your narration, set your scene pace, and ThomCreates splits your script
+      into perfectly timed atmospheric images — all in the Tatterveil documentary style.
+    </p>
+    <div class="hero-cta">
+      <a href="#create" class="btn btn-primary">
+        <span>Create Project</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <a href="#how" class="btn btn-ghost">How it works</a>
+    </div>
+  </div>
+  <div class="hero-scroll-indicator">
+    <span>scroll</span>
+    <div class="scroll-line"></div>
+  </div>
+</section>
+
+<!-- ── How it works ───────────────────────────────────────────────────────── -->
+<section class="features" id="how">
+  <div class="container">
+    <p class="section-label animate-fade-up">Process</p>
+    <h2 class="section-title animate-fade-up">From script to visuals in four steps</h2>
+    <div class="feature-grid">
+      <div class="feature-card animate-fade-up" style="--delay:0.05s">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M7 8h8M7 12h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </div>
+        <span class="feature-step">01</span>
+        <h3 class="feature-title">Paste your script</h3>
+        <p class="feature-desc">The system counts your words and instantly estimates how long your video will be — 150 words equals roughly 1 minute of narration.</p>
+      </div>
+      <div class="feature-card animate-fade-up" style="--delay:0.1s">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v4M11 15v4M3 11h4m6 0h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="11" cy="11" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
+        </div>
+        <span class="feature-step">02</span>
+        <h3 class="feature-title">Set your scene pace</h3>
+        <p class="feature-desc">Choose how many images per minute for the opening 5 minutes, then a separate rate for the rest — faster pace early, slower later.</p>
+      </div>
+      <div class="feature-card animate-fade-up" style="--delay:0.15s">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 11h14M4 7h10M4 15h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </div>
+        <span class="feature-step">03</span>
+        <h3 class="feature-title">5-step prompt generation</h3>
+        <p class="feature-desc">GPT-5.4-mini detects time periods, classifies scene types, triggers abstraction mode for mysteries, and writes a full Tatterveil-style prompt per scene.</p>
+      </div>
+      <div class="feature-card animate-fade-up" style="--delay:0.2s">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="4" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="12" y="4" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="13" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="12" y="13" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>
+        </div>
+        <span class="feature-step">04</span>
+        <h3 class="feature-title">2048×1152 images</h3>
+        <p class="feature-desc">gpt-image-2 renders every scene at full 16:9 resolution in your chosen quality — all consistent in style, palette, and atmosphere.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Create form ────────────────────────────────────────────────────────── -->
+<section class="create-section" id="create">
+  <div class="container">
+    <p class="section-label animate-fade-up">New Project</p>
+    <h2 class="section-title animate-fade-up">Generate your scenes</h2>
+
+    <div class="form-layout animate-fade-up">
+      <!-- Left: form -->
+      <form id="create-form" class="create-form" novalidate>
+
+        <!-- Video name -->
+        <div class="form-group">
+          <label class="form-label" for="name">Video Title</label>
+          <input
+            type="text"
+            id="name"
+            name="name"
+            class="form-input"
+            placeholder="e.g. The Antikythera Mechanism"
+            maxlength="120"
+            required
+          />
+        </div>
+
+        <!-- Script -->
+        <div class="form-group">
+          <div class="form-label-row">
+            <label class="form-label" for="script">
+              Narration Script
+            </label>
+            <button type="button" class="info-btn"
+              data-tip="Write your full spoken narration — the words you will actually say in the video.&#10;&#10;Rules for best results:&#10;• Write only spoken words, no stage directions&#10;• Mention specific objects, locations, and time periods — the AI uses these for visuals&#10;• Typical YouTube narration is about 150 words per minute&#10;• 300 words ≈ 2 min video · 750 words ≈ 5 min · 1500 words ≈ 10 min&#10;&#10;There is no minimum or maximum — the system adapts to any length.">
+              ⓘ How to write your script
+            </button>
+          </div>
+          <textarea
+            id="script"
+            name="script"
+            class="form-textarea"
+            rows="10"
+            placeholder="Paste your full narration script here…&#10;&#10;Example: 'In 1901, sponge divers off the coast of the Greek island of Antikythera pulled something from a Roman shipwreck that nobody knew existed. It was a hunk of corroded bronze about the size of a shoebox — and historians are still arguing about it today…'"
+            required
+          ></textarea>
+          <!-- Live script analysis bar -->
+          <div class="script-analysis" id="script-analysis">
+            <div class="analysis-item">
+              <span class="analysis-value" id="ana-words">0</span>
+              <span class="analysis-label">words</span>
+            </div>
+            <div class="analysis-sep">·</div>
+            <div class="analysis-item analysis-item--highlight">
+              <span class="analysis-value" id="ana-duration">—</span>
+              <span class="analysis-label">min video</span>
+            </div>
+            <div class="analysis-sep">·</div>
+            <div class="analysis-item">
+              <span class="analysis-value" id="ana-scenes">—</span>
+              <span class="analysis-label">scenes</span>
+            </div>
+            <div class="analysis-sep analysis-sep--grow"></div>
+            <span class="analysis-hint" id="ana-hint"></span>
+          </div>
+        </div>
+
+        <!-- Locked badges row (style + aspect ratio) -->
+        <div class="config-row">
+          <div class="form-group form-group--sm">
+            <label class="form-label">Style</label>
+            <div class="locked-badge">
+              <span class="locked-icon">◈</span>
+              Tatterveil
+              <span class="locked-tag">only</span>
+            </div>
+            <input type="hidden" name="style" value="Tatterveil" />
+          </div>
+          <div class="form-group form-group--sm">
+            <label class="form-label">Aspect Ratio</label>
+            <div class="locked-badge">
+              <span class="locked-icon">⬛</span>
+              16 : 9
+              <span class="locked-tag">only</span>
+            </div>
+            <input type="hidden" name="aspect_ratio" value="16:9" />
+          </div>
+        </div>
+
+        <!-- Resolution + Quality row -->
+        <div class="config-row">
+
+          <!-- Resolution selector -->
+          <div class="form-group form-group--lg">
+            <div class="form-label-row">
+              <label class="form-label">Resolution</label>
+              <button type="button" class="info-btn"
+                data-tip="Image pixel size. All resolutions are true 16:9 landscape.&#10;&#10;HD 1280×720 — fastest, smallest files, good for previews&#10;2K 2048×1152 — balanced quality vs cost (recommended)&#10;4K Ultra 3840×2160 — maximum detail, slowest, highest cost&#10;&#10;Higher resolution takes longer and costs more per image.">
+                ⓘ
+              </button>
+            </div>
+            <div class="resolution-selector" role="radiogroup" aria-label="Resolution">
+              <label class="res-option">
+                <input type="radio" name="resolution" value="1280x720" />
+                <span class="res-label">
+                  <span class="res-tier">HD</span>
+                  <span class="res-size">1280×720</span>
+                  <span class="res-note">Fastest</span>
+                </span>
+              </label>
+              <label class="res-option">
+                <input type="radio" name="resolution" value="2048x1152" checked />
+                <span class="res-label">
+                  <span class="res-tier">2K</span>
+                  <span class="res-size">2048×1152</span>
+                  <span class="res-note">Balanced</span>
+                </span>
+              </label>
+              <label class="res-option">
+                <input type="radio" name="resolution" value="3840x2160" />
+                <span class="res-label">
+                  <span class="res-tier">4K Ultra</span>
+                  <span class="res-size">3840×2160</span>
+                  <span class="res-note">Highest detail</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Quality -->
+          <div class="form-group form-group--sm">
+            <div class="form-label-row">
+              <label class="form-label">Quality</label>
+              <button type="button" class="info-btn"
+                data-tip="Controls how much processing gpt-image-2 uses on each image.&#10;&#10;Low — fastest, lowest cost, good for drafts&#10;Medium — balanced (recommended for production)&#10;High — maximum detail and atmosphere, highest cost&#10;&#10;Quality is independent of resolution. You can pick e.g. 4K + Low for previews.">
+                ⓘ
+              </button>
+            </div>
+            <div class="quality-selector" role="radiogroup" aria-label="Quality">
+              <label class="quality-option">
+                <input type="radio" name="quality" value="low" />
+                <span class="quality-label">
+                  <span class="quality-name">Low</span>
+                  <span class="quality-detail">Draft</span>
+                </span>
+              </label>
+              <label class="quality-option">
+                <input type="radio" name="quality" value="medium" checked />
+                <span class="quality-label">
+                  <span class="quality-name">Medium</span>
+                  <span class="quality-detail">Balanced</span>
+                </span>
+              </label>
+              <label class="quality-option">
+                <input type="radio" name="quality" value="high" />
+                <span class="quality-label">
+                  <span class="quality-name">High</span>
+                  <span class="quality-detail">Best</span>
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scene timing -->
+        <div class="timing-section">
+          <div class="form-label-row">
+            <p class="form-label">Scene Timing</p>
+            <button type="button" class="info-btn"
+              data-tip="How many images per minute of video?&#10;&#10;Example with a 10-minute video:&#10;  First 5 min × 3 scenes/min = 15 images&#10;  Remaining 5 min × 2 scenes/min = 10 images&#10;  Total = 25 images&#10;&#10;Why two rates? Opening minutes need more visual variety to hook viewers. Later, engaged viewers need fewer image changes.&#10;&#10;Why max 8? Above 8 scenes/min each image shows for less than 8 seconds — too fast to read visually. Below 1 scene/min images stay on screen over a minute — usually too long.">
+              ⓘ How scene counts are calculated
+            </button>
+          </div>
+          <div class="timing-grid">
+            <div class="timing-field">
+              <label class="timing-label" for="first_rate">
+                First 5 minutes
+                <span class="timing-unit">scenes / min</span>
+              </label>
+              <div class="slider-row">
+                <input type="range" id="first_rate_slider" min="1" max="8" value="3" class="range-slider" />
+                <input type="number" id="first_rate" name="first_rate" min="1" max="8" value="3" class="range-number" />
+              </div>
+              <p class="timing-hint" id="first-rate-hint">1 image every 20 seconds</p>
+            </div>
+            <div class="timing-field">
+              <label class="timing-label" for="rest_rate">
+                Remaining duration
+                <span class="timing-unit">scenes / min</span>
+              </label>
+              <div class="slider-row">
+                <input type="range" id="rest_rate_slider" min="1" max="8" value="2" class="range-slider" />
+                <input type="number" id="rest_rate" name="rest_rate" min="1" max="8" value="2" class="range-number" />
+              </div>
+              <p class="timing-hint" id="rest-rate-hint">1 image every 30 seconds</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button type="submit" class="btn btn-primary btn-submit" id="submit-btn">
+          <span id="submit-label">Generate Scenes</span>
+          <svg id="submit-icon" width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M3 9h12M11 5l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span id="submit-spinner" class="spinner hidden"></span>
+        </button>
+
+      </form><!-- /create-form -->
+
+      <!-- Right: live estimate panel -->
+      <aside class="estimate-panel" id="estimate-panel">
+        <div class="estimate-header">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Live Video Estimate
+        </div>
+
+        <div class="estimate-hero">
+          <span class="estimate-duration" id="est-duration">—</span>
+          <span class="estimate-duration-label">minute video</span>
+        </div>
+
+        <div class="estimate-how">
+          <p class="estimate-how-text" id="est-calc-text">
+            Enter your script to see the estimate.
+          </p>
+        </div>
+
+        <div class="estimate-breakdown">
+          <div class="estimate-row">
+            <span class="estimate-row-label">First segment</span>
+            <span class="estimate-row-value" id="est-first-scenes">—</span>
+          </div>
+          <div class="estimate-row">
+            <span class="estimate-row-label">Remaining</span>
+            <span class="estimate-row-value" id="est-rest-scenes">—</span>
+          </div>
+          <div class="estimate-divider"></div>
+          <div class="estimate-row estimate-row--total">
+            <span class="estimate-row-label">Total scenes</span>
+            <span class="estimate-row-value" id="est-total-scenes">—</span>
+          </div>
+        </div>
+
+        <div class="estimate-explainer">
+          <p class="explainer-title">How duration is calculated</p>
+          <p class="explainer-body">
+            YouTube narration averages <strong>150 words per minute</strong>. The system
+            counts the words in your script and divides by 150 to estimate the video length.
+          </p>
+          <p class="explainer-body" style="margin-top:0.5rem">
+            Scene count is split into two segments: the <strong>opening 5 minutes</strong>
+            (higher image rate for visual variety) and the <strong>rest of the video</strong>
+            (lower rate for a more measured pace). You control both rates with the sliders.
+          </p>
+          <p class="explainer-body" style="margin-top:0.5rem">
+            The <strong>maximum is 8 scenes/min</strong> because above that each image
+            would show for under 8 seconds — too brief to register visually.
+          </p>
+        </div>
+
+        <div class="style-preview">
+          <p class="style-preview-label">Style: Tatterveil</p>
+          <ul class="style-preview-list">
+            <li>Atmospheric Photorealistic</li>
+            <li>Desaturated cool palette</li>
+            <li>Deep shadow · ambient light only</li>
+            <li>Mist &amp; atmospheric haze</li>
+            <li id="style-res-line">2048×1152 · 16:9 · PNG</li>
+          </ul>
+        </div>
+      </aside>
+
+    </div><!-- /form-layout -->
+  </div>
+</section>
+
+<!-- ── Recent projects ────────────────────────────────────────────────────── -->
+{% if projects %}
+<section class="projects-section" id="projects">
+  <div class="container">
+    <p class="section-label animate-fade-up">Your work</p>
+    <h2 class="section-title animate-fade-up">Recent Projects</h2>
+    <div class="projects-grid">
+      {% for p in projects %}
+      <a href="/projects/{{ p.id }}" class="project-card animate-fade-up" style="--delay:{{ loop.index0 * 0.05 }}s">
+        <div class="project-card-top">
+          <span class="project-status-dot status-{{ p.step }}"></span>
+          <span class="project-quality-tag">{{ p.quality }}</span>
+        </div>
+        <h3 class="project-card-name">{{ p.name }}</h3>
+        <div class="project-card-meta">
+          <span>{{ p.total_scenes }} scenes</span>
+          <span class="meta-sep">·</span>
+          <span>{{ "%.1f"|format(p.duration_minutes) }} min</span>
+          <span class="meta-sep">·</span>
+          <span>{{ p.style }}</span>
+        </div>
+        <div class="project-card-footer">
+          {% if p.step == "done" %}
+            <span class="project-state done">Complete</span>
+          {% elif p.step == "error" %}
+            <span class="project-state error">Failed</span>
+          {% else %}
+            <span class="project-state processing">{{ p.progress }}% — Processing</span>
+          {% endif %}
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

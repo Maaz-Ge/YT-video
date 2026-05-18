@@ -1,0 +1,429 @@
+{% extends "layout.html" %}
+{% block title %}{{ project.name }} — ThomCreates Scene Studio{% endblock %}
+
+{% block content %}
+
+<!-- ── Project header ─────────────────────────────────────────────────────── -->
+<section class="project-hero">
+  <div class="container">
+    <a href="/" class="back-link">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M12 7H2M6 3L2 7l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Back to Studio
+    </a>
+    <div class="project-hero-body animate-fade-up">
+      <div class="project-hero-title-row">
+        <h1 class="project-hero-title">{{ project.name }}</h1>
+        <div class="project-hero-actions">
+          <button class="btn btn-ghost btn-sm" id="btn-delete" data-project-id="{{ project.id }}">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4h10M5 4V2.5a.5.5 0 01.5-.5h3a.5.5 0 01.5.5V4M11 4l-.8 7.2a.5.5 0 01-.5.3H4.3a.5.5 0 01-.5-.3L3 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Delete
+          </button>
+        </div>
+      </div>
+      <div class="project-meta-chips">
+        <span class="chip chip--style">◈ {{ project.style }}</span>
+        <span class="chip chip--ratio">{{ project.aspect_ratio }}</span>
+        <span class="chip chip--quality">{{ project.quality }}</span>
+        {% if project.resolution %}
+          <span class="chip chip--resolution">{{ project.resolution }}</span>
+        {% endif %}
+        {% if project.scene_plan %}
+          <span class="chip chip--scenes">{{ project.scene_plan.total_scenes }} scenes</span>
+          <span class="chip chip--duration">{{ "%.1f"|format(project.scene_plan.duration_minutes) }} min</span>
+        {% endif %}
+        {% if project.created_at %}
+          <span class="chip chip--date">Created {{ project.created_at | format_ts }}</span>
+        {% endif %}
+      </div>
+
+      <div class="project-export-bar">
+        <button
+          type="button"
+          class="btn btn-sm"
+          id="btn-export-zip"
+          {% if not export_available %}disabled{% endif %}
+        >
+          Download ZIP (MP4s + metadata)
+        </button>
+        <span class="hint" id="export-zip-hint">
+          {% if duplicate_slots %}
+          Export blocked: duplicate timestamps — delete extra variants first.
+          {% elif state.get('step') not in ('done', 'error') %}
+          Export unlocks when generation finishes (one MP4 per scene slot, length = scene duration).
+          {% else %}
+          Includes scene_001.mp4 … in slot order, scene_timestamps.txt, and project_export_metadata.json.
+          {% endif %}
+        </span>
+      </div>
+    </div>
+
+    <!-- ── Project details panel ──────────────────────────────────────────── -->
+    <details class="project-details-panel animate-fade-up">
+      <summary class="project-details-toggle">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 4.5l4.5 4.5 4.5-4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Project Settings &amp; Script
+      </summary>
+      <div class="project-details-body">
+
+        <!-- Settings grid -->
+        <div class="proj-settings-grid">
+          <div class="proj-setting">
+            <span class="proj-setting-label">Style</span>
+            <span class="proj-setting-value">{{ project.style }}</span>
+          </div>
+          <div class="proj-setting">
+            <span class="proj-setting-label">Quality</span>
+            <span class="proj-setting-value">{{ project.quality | capitalize }}</span>
+          </div>
+          <div class="proj-setting">
+            <span class="proj-setting-label">Aspect ratio</span>
+            <span class="proj-setting-value">{{ project.aspect_ratio }}</span>
+          </div>
+          {% if project.resolution %}
+          <div class="proj-setting">
+            <span class="proj-setting-label">Resolution</span>
+            <span class="proj-setting-value">{{ project.resolution }}</span>
+          </div>
+          {% endif %}
+          <div class="proj-setting">
+            <span class="proj-setting-label">Scenes/min — first 5 min</span>
+            <span class="proj-setting-value">{{ project.first_rate }}</span>
+          </div>
+          <div class="proj-setting">
+            <span class="proj-setting-label">Scenes/min — remaining</span>
+            <span class="proj-setting-value">{{ project.rest_rate }}</span>
+          </div>
+          {% if project.scene_plan %}
+          <div class="proj-setting">
+            <span class="proj-setting-label">Total scenes</span>
+            <span class="proj-setting-value">{{ project.scene_plan.total_scenes }}</span>
+          </div>
+          <div class="proj-setting">
+            <span class="proj-setting-label">Est. video duration</span>
+            <span class="proj-setting-value">{{ "%.1f"|format(project.scene_plan.duration_minutes) }} min</span>
+          </div>
+          {% endif %}
+          {% if project.created_at %}
+          <div class="proj-setting">
+            <span class="proj-setting-label">Created</span>
+            <span class="proj-setting-value">{{ project.created_at | format_ts }}</span>
+          </div>
+          {% endif %}
+        </div>
+
+        <!-- Full script -->
+        <div class="proj-script-section">
+          <div class="proj-script-header">
+            <span class="proj-script-label">Full Script Provided</span>
+            <span class="proj-script-words">
+              {{ project.script.split()|length }} words
+            </span>
+          </div>
+          <div class="proj-script-body" id="proj-script-body">
+            {{ project.script }}
+          </div>
+        </div>
+
+      </div>
+    </details>
+  </div>
+</section>
+
+<div
+  id="duplicate-scenes-banner"
+  class="banner-dup-scenes container"
+  {% if duplicate_slots %}style="display:flex"{% endif %}
+>
+  {% if duplicate_slots %}
+  <span id="duplicate-scenes-text">
+    Multiple images share the same timestamps for slots: {{ duplicate_slots | join(', ') }}.
+    Delete variants until each timestamp has exactly one image to enable ZIP export.
+  </span>
+  {% else %}
+  <span id="duplicate-scenes-text"></span>
+  {% endif %}
+</div>
+
+<!-- ── Progress section ───────────────────────────────────────────────────── -->
+<section class="progress-section" id="progress-section">
+  <div class="container">
+
+    <div class="step-track" id="step-track">
+      <div class="step-item" id="step-analysing" data-steps="queued,analysing">
+        <div class="step-dot"></div>
+        <span class="step-label">Analysing Script</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" id="step-prompting" data-steps="prompting,prompting_done">
+        <div class="step-dot"></div>
+        <span class="step-label">Generating Prompts</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" id="step-generating" data-steps="generating">
+        <div class="step-dot"></div>
+        <span class="step-label">Rendering Images</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" id="step-done" data-steps="done">
+        <div class="step-dot"></div>
+        <span class="step-label">Complete</span>
+      </div>
+    </div>
+
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="progress-bar" style="width:0%"></div>
+      </div>
+      <div class="progress-bar-meta">
+        <span id="progress-message">Initialising…</span>
+        <span id="progress-pct">0%</span>
+      </div>
+    </div>
+
+    <div class="image-counter" id="image-counter" style="display:none">
+      <span id="counter-done">0</span>
+      <span class="counter-sep">/</span>
+      <span id="counter-total">0</span>
+      <span class="counter-label">images rendered</span>
+    </div>
+
+  </div>
+</section>
+
+<div
+  id="regen-busy-banner"
+  class="regen-busy-banner container"
+  {% if state.get('regeneration', {}).get('busy') %}style="display:flex"{% endif %}
+>
+  <span>Regenerating a scene — new variant will appear when rendering finishes.</span>
+</div>
+
+<!-- ── Timing summary (visible when complete) ─────────────────────────────── -->
+{% if timing and timing.image_summary %}
+<section class="timing-section" id="timing-section">
+  <div class="container">
+    <div class="timing-card animate-fade-up">
+      <div class="timing-card-header">
+        <p class="section-label" style="margin-bottom:0">Generation Summary</p>
+        <span class="timing-badge">Complete</span>
+      </div>
+
+      <div class="timing-grid">
+        <div class="timing-stat">
+          <span class="timing-stat-label">Total time</span>
+          <span class="timing-stat-value">{{ "%.1f"|format(timing.total_seconds) }}<span class="timing-stat-unit">s</span></span>
+          <span class="timing-stat-sub">{{ "%.1f"|format(timing.total_seconds / 60) }} min wall clock</span>
+        </div>
+        <div class="timing-stat">
+          <span class="timing-stat-label">Images rendered</span>
+          <span class="timing-stat-value">{{ timing.image_summary.successful }}<span class="timing-stat-unit">/{{ timing.image_summary.total_scenes }}</span></span>
+          <span class="timing-stat-sub">
+            {% if timing.image_summary.failed > 0 %}{{ timing.image_summary.failed }} failed{% else %}0 failed{% endif %}
+          </span>
+        </div>
+        <div class="timing-stat timing-stat--highlight">
+          <span class="timing-stat-label">Avg per image</span>
+          <span class="timing-stat-value">{{ "%.1f"|format(timing.image_summary.avg_image_seconds) }}<span class="timing-stat-unit">s</span></span>
+          <span class="timing-stat-sub">across {{ timing.image_summary.successful }} images</span>
+        </div>
+        <div class="timing-stat">
+          <span class="timing-stat-label">Fastest</span>
+          <span class="timing-stat-value">{{ "%.1f"|format(timing.image_summary.fastest_seconds) }}<span class="timing-stat-unit">s</span></span>
+          <span class="timing-stat-sub">single image</span>
+        </div>
+        <div class="timing-stat">
+          <span class="timing-stat-label">Slowest</span>
+          <span class="timing-stat-value">{{ "%.1f"|format(timing.image_summary.slowest_seconds) }}<span class="timing-stat-unit">s</span></span>
+          <span class="timing-stat-sub">single image</span>
+        </div>
+        <div class="timing-stat">
+          <span class="timing-stat-label">Image batch wall</span>
+          <span class="timing-stat-value">{{ "%.1f"|format(timing.image_summary.wall_clock_seconds) }}<span class="timing-stat-unit">s</span></span>
+          <span class="timing-stat-sub">{{ timing.image_summary.parallel_workers }} parallel workers</span>
+        </div>
+      </div>
+
+      <div class="timing-meta">
+        <div class="timing-meta-item">
+          <span class="timing-meta-label">Resolution</span>
+          <span class="timing-meta-value">{{ timing.image_summary.resolution }}</span>
+        </div>
+        <div class="timing-meta-item">
+          <span class="timing-meta-label">Quality</span>
+          <span class="timing-meta-value">{{ timing.image_summary.quality | capitalize }}</span>
+        </div>
+        <div class="timing-meta-item">
+          <span class="timing-meta-label">Script analysis</span>
+          <span class="timing-meta-value">{{ "%.1f"|format(timing.analyse_seconds) }}s</span>
+        </div>
+        <div class="timing-meta-item">
+          <span class="timing-meta-label">Prompt generation</span>
+          <span class="timing-meta-value">{{ "%.1f"|format(timing.prompt_seconds) }}s</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<!-- ── Scene grid ─────────────────────────────────────────────────────────── -->
+<section class="scenes-section" id="scenes-section">
+  <div class="container">
+    <div class="scenes-header" id="scenes-header" style="display:none">
+      <p class="section-label">Output</p>
+      <div class="scenes-header-row">
+        <h2 class="section-title">Generated Scenes</h2>
+        <span class="scenes-count-badge" id="scenes-count-badge">0 scenes</span>
+      </div>
+    </div>
+
+    <div class="scene-grid" id="scene-grid">
+      {% if scenes %}
+        {% for s in scenes %}
+        {% set slot = s.slot_number or s.scene_number %}
+        {% set v = (s.variant_index | default(0)) | int %}
+        {% set v_label = 'Original' if v == 0 else 'Variant ' ~ v %}
+        {% set img_file = s.image_path.replace('\\', '/').split('/')[-1] if s.image_path else '' %}
+        {% set slot_dup = duplicate_slots and (slot in duplicate_slots) %}
+        <div
+          class="scene-card animate-fade-up"
+          style="--delay:{{ loop.index0 * 0.04 }}s"
+          id="scene-entry-{{ s.entry_id }}"
+          data-entry-id="{{ s.entry_id }}"
+        >
+          {% if slot_dup %}
+          <div class="scene-dup-banner">Duplicate timestamp — keep one variant for export</div>
+          {% endif %}
+
+          <div class="scene-img-wrap">
+            {% if s.image_path and s.image_status == 'done' %}
+              <img
+                src="/projects/{{ project.id }}/images/{{ img_file }}"
+                alt="Scene {{ slot }}"
+                class="scene-img"
+                loading="lazy"
+              />
+            {% elif s.image_status == 'error' %}
+              <div class="scene-img-placeholder scene-img-placeholder--error">
+                <span>Image failed</span>
+              </div>
+            {% else %}
+              <div class="scene-img-placeholder">
+                <div class="placeholder-spinner"></div>
+              </div>
+            {% endif %}
+            {% if s.image_status == 'pending' %}
+            <div class="scene-pending-label" style="display:block">Rendering…</div>
+            {% endif %}
+            {% if s.image_status == 'error' %}
+            <div class="scene-image-error" style="display:block">{{ s.image_error or 'Image failed' }}</div>
+            {% endif %}
+            <div class="scene-img-overlay">
+              <span class="scene-badge-num">{{ "%02d"|format(slot) }}</span>
+              <span class="scene-badge-time">
+                {{ "%d:%02d"|format((s.start_time|int)//60, (s.start_time|int)%60) }}
+                –
+                {{ "%d:%02d"|format((s.end_time|int)//60, (s.end_time|int)%60) }}
+              </span>
+              <span class="scene-badge-variant">{{ v_label }}</span>
+            </div>
+          </div>
+
+          <div class="scene-card-body">
+            <div class="scene-card-tags">
+              <span class="scene-type-tag" style="--tag-color:{{ scene_type_colors.get(s.scene_type, '#555') }}">
+                {{ scene_type_names.get(s.scene_type, 'Unknown') }}
+              </span>
+              <span class="scene-period-tag">{{ period_labels.get(s.time_period, s.time_period) }}</span>
+              {% if s.abstraction_mode %}
+                <span class="scene-abstract-tag">Abstract Mode</span>
+              {% endif %}
+              {% if s.image_seconds %}
+                <span class="scene-time-tag">{{ "%.1f"|format(s.image_seconds) }}s</span>
+              {% endif %}
+            </div>
+
+            {% if s.get('scene_type_reasoning') or s.get('time_period_reasoning') %}
+            <div class="scene-reasoning">
+              {% if s.get('time_period_reasoning') %}
+                <p class="reasoning-item"><span class="reasoning-key">Era:</span> {{ s.time_period_reasoning }}</p>
+              {% endif %}
+              {% if s.get('scene_type_reasoning') %}
+                <p class="reasoning-item"><span class="reasoning-key">Type:</span> {{ s.scene_type_reasoning }}</p>
+              {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="scene-section">
+              <p class="scene-section-label">
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none"><rect x="1" y="1" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M3 4h5M3 6.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                Script covered in this scene
+              </p>
+              {% if s.script_segment|length > 220 %}
+              <p class="scene-script-seg">
+                <span class="seg-trunc">{{ s.script_segment[:220] }}</span>
+                <span class="seg-full" hidden>{{ s.script_segment }}</span>
+                <button type="button" class="btn-expand-text" data-expanded="0">… read more</button>
+              </p>
+              {% else %}
+              <p class="scene-script-seg"><span class="seg-only">{{ s.script_segment }}</span></p>
+              {% endif %}
+            </div>
+
+            <div class="scene-card-actions">
+              <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="{{ s.entry_id }}" {% if s.image_status != 'done' %}disabled{% endif %}>Regenerate</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}">Delete variant</button>
+            </div>
+
+            <details class="scene-prompt-details">
+              <summary class="scene-prompt-toggle">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Prompt sent to gpt-image-2
+              </summary>
+              <div class="scene-prompt-body">
+                <p class="scene-prompt-label-inner">Positive prompt:</p>
+                <p class="scene-prompt-text">{{ s.prompt }}</p>
+                {% if s.negative_prompt %}
+                <p class="scene-prompt-label-inner" style="margin-top:0.75rem">Negative constraints:</p>
+                <p class="scene-prompt-text scene-prompt-negative">{{ s.negative_prompt }}</p>
+                {% endif %}
+                <div class="scene-prompt-actions">
+                  <button class="btn-copy-prompt" onclick="copyPrompt(this)" data-prompt="{{ s.prompt | e }}">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="1.5" y="3" width="7" height="8" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M3 3V2a.5.5 0 01.5-.5h7a.5.5 0 01.5.5v8a.5.5 0 01-.5.5H10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                    Copy prompt
+                  </button>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+        {% endfor %}
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<div id="regen-modal" class="modal-overlay" hidden>
+  <div class="modal-card">
+    <h3>Regenerate image</h3>
+    <p class="modal-hint">Describe what to change. The model merges your note with the previous prompt while preserving the documentary / Tatterveil style.</p>
+    <textarea id="regen-instructions" placeholder="e.g. More fog at ground level; pull horizon lower; colder colour grade…"></textarea>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost btn-sm" id="regen-cancel">Cancel</button>
+      <button type="button" class="btn btn-sm" id="regen-submit">Start regeneration</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.PROJECT_ID     = "{{ project.id }}";
+  window.INIT_STEP      = "{{ state.get('step', 'queued') }}";
+  window.INIT_PROGRESS  = {{ state.get('progress', 0) }};
+  window.SCENE_TYPE_NAMES  = {{ scene_type_names | tojson }};
+  window.SCENE_TYPE_COLORS = {{ scene_type_colors | tojson }};
+  window.PERIOD_LABELS     = {{ period_labels | tojson }};
+</script>
+{% endblock %}
