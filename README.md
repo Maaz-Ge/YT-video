@@ -9,6 +9,8 @@ Visual Style Guide.
 
 ## Quick Start
 
+### Local development (Python)
+
 ```bash
 cd YT-video
 pip install -r requirements.txt
@@ -16,6 +18,18 @@ python app.py          # starts on http://localhost:5001
 ```
 
 **Exports:** install [FFmpeg](https://ffmpeg.org/) on your PATH (used to turn each PNG into an MP4 of the scene duration).
+
+### Production (Docker — recommended on a server)
+
+```bash
+cd YT-video
+cp .env.example .env    # add OPENAI_API_KEY
+docker compose build
+docker compose up -d    # http://localhost:5001
+```
+
+ffmpeg and Python deps are included in the image; `projects/` is persisted via a volume mount.  
+**Full step-by-step server migration** (from tmux + venv): see **[DOCKER-DEPLOY.md](DOCKER-DEPLOY.md)**.
 
 Requires an `.env` file in this folder (or in `../image_generator/`):
 
@@ -233,20 +247,48 @@ If all attempts fail the scene is marked `error` and generation continues for re
 
 ## Regenerate & duplicate timeline slots
 
-- **Regenerate** (per scene row) asks the LLM for a **new** prompt built from the old prompt + your instructions, then renders a **new PNG** under a **new filename** (`scene_002_v1.png`, …). Older variants are kept until you delete them.
-- Rows are keyed by **`entry_id`**. Duplicate **slots** (same timeline index / timestamp group) disable **ZIP export** until you delete extra variants.
+- Click **Regenerate** on any completed scene card, type your change instructions and **Add to queue**. The LLM rewrites the prompt (preserving the Tatterveil style) and a new image is rendered as a **new variant row** with a fresh filename (`scene_002_v1.png`, …). Older variants are kept until you delete them.
+- **Up to 4 image renders run in parallel** (see `REGEN_PARALLELISM`). You can queue as many regenerations as you like — the rest wait their turn. Prompt-rewrite LLM calls run in parallel across all 4 workers.
+- A **Regeneration queue** card above the scene grid shows each job's state — `Composing new prompt…` → `Generating new image…` → `Done`. A spinner badge also overlays the new variant card while its image is being rendered.
+- Rows are keyed by **`entry_id`**. Duplicate **slots** (same timeline index) disable **ZIP export** until you delete extra variants.
 
 ---
 
-## ZIP export (`ffmpeg`)
+## Cost preview & confirmation
 
-When each slot has exactly one remaining row and all those rows are successful:
+The system uses the OpenAI image price table:
+
+| Resolution | Low | Medium | High |
+|------------|-----|--------|------|
+| 1280×720   | $0.003 | $0.028 | $0.114 |
+| 2048×1152  | $0.005 | $0.042 | $0.170 |
+| 3840×2160  | $0.011 | $0.100 | $0.400 |
+
+Total cost = `(scene count × per-image price) + $1` (flat overhead for the scene-splitter + prompt-writer LLM calls).
+
+- The **live estimate panel** updates the cost as you tweak the script, resolution, quality, and timing sliders.
+- Clicking **Generate Scenes** opens a **cost-confirmation modal** — generation only runs after you click **Confirm & Generate**.
+- After generation finishes, the **project settings card** shows `$X.XXXX` (final), counting only images that succeeded. While generating, it shows the `~$X.XXXX` estimate based on the planned scene count.
+
+---
+
+## ZIP export with progress (`ffmpeg`)
+
+When every slot has exactly one row and all those rows are successful:
 
 1. **`scene_timestamps.txt`** — lists each MP4 filename with slot, start, end, and duration (seconds).
-2. **`scene_001.mp4`, `scene_002.mp4`, …** — ascending slot order; each clip is exactly the scene’s duration (`duration` field, or `end_time − start_time`).
+2. **`scene_001.mp4`, `scene_002.mp4`, …** — ascending slot order; each clip is exactly the scene's duration (`duration` field, or `end_time − start_time`).
 3. **`project_export_metadata.json`** — project `meta`, `timing`, full `scenes` array, export timestamp.
 
+The **Download ZIP** button now opens a **progress modal** that polls the backend job (`/api/projects/<id>/exports/<job_id>`) showing "Rendering MP4 X/Y — slot ZZZ", then "Packing ZIP archive…", with a live percent bar. The browser download triggers automatically when the archive is ready.
+
 Requires **ffmpeg** on `PATH`. See **`technicalguide.md`** for internals.
+
+---
+
+## Image lightbox
+
+Click any completed scene image (or its **Enlarge** button) to open a full-screen lightbox. Close via the `×` button, the `Esc` key, or by clicking the dark backdrop.
 
 ---
 
@@ -268,11 +310,17 @@ Requires **ffmpeg** on `PATH`. See **`technicalguide.md`** for internals.
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/` | Landing page + recent projects list |
-| `POST` | `/api/estimate` | Live scene-count estimate (JSON) |
+| `POST` | `/api/estimate` | Live scene-count + **cost** estimate (JSON) |
+| `GET` | `/api/pricing` | Raw pricing table (`image_costs`, `prompt_overhead_usd`) |
 | `POST` | `/api/generate` | Create project + start background generation |
-| `GET` | `/api/projects/<id>/status` | Polling: step, scenes, duplicate slots, `export_blocked`, regeneration |
-| `GET` | `/api/projects/<id>/export.zip` | ZIP: MP4s + manifests (blocked while duplicate slots exist) |
-| `POST` | `/api/projects/<id>/scenes/<entry>/regenerate` | New variant row + image (instructions JSON body) |
+| `GET` | `/api/projects/<id>/status` | Polling: step, scenes, duplicate slots, `export_blocked`, `regeneration_jobs[]`, `cost_estimate`, `cost_actual` |
+| `POST` | `/api/projects/<id>/exports` | Start a progress-aware ZIP export job |
+| `GET` | `/api/projects/<id>/exports/<job_id>` | Poll export progress (stage, percent, current/total) |
+| `GET` | `/api/projects/<id>/exports/<job_id>/file` | Download the finished ZIP |
+| `GET` | `/api/projects/<id>/export.zip` | Legacy synchronous ZIP download (no progress) |
+| `POST` | `/api/projects/<id>/scenes/<entry>/regenerate` | Enqueue a regeneration (up to 4 run in parallel) |
+| `GET` | `/api/projects/<id>/regenerations` | List active + recently-finished regeneration jobs |
+| `DELETE` | `/api/projects/<id>/regenerations/<job_id>` | Dismiss a finished regeneration job |
 | `DELETE` | `/api/projects/<id>/scenes/<entry>` | Remove one variant and its PNG |
 | `GET` | `/projects/<id>` | Project view page |
 | `GET` | `/projects/<id>/images/<filename>` | Serve generated image (PNG) |
@@ -324,6 +372,9 @@ The system enforces all of the following on every generated image:
 | `WORDS_PER_MINUTE` | `150` | Narration pace for duration estimate |
 | `MIN_DURATION` | `1.0` | Minimum video duration (minutes) |
 | `FIRST_SEGMENT` | `5` | Minutes before scene-rate switches |
-| `MAX_WORKERS` | `3` | Parallel image generation threads |
+| `MAX_WORKERS` | `3` | Parallel image generation threads (initial run) |
+| `REGEN_PARALLELISM` | `4` | Max concurrent regeneration image renders |
+| `IMAGE_COSTS` | *(table above)* | Per-image USD price by resolution × quality |
+| `PROMPT_GENERATION_FLAT_COST` | `1.00` | Flat per-project overhead added to cost preview |
 | `MAX_RETRIES` | `3` | Retry attempts per image |
 | `RETRY_DELAY` | `2.5` | Base back-off delay (seconds) |

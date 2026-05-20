@@ -317,6 +317,21 @@
           </div>
         </div>
 
+        <div class="estimate-cost">
+          <div class="estimate-cost-header">
+            <span class="estimate-cost-eyebrow">Estimated cost</span>
+            <button type="button" class="info-btn"
+              data-tip="Per-image price comes from your resolution × quality pick.&#10;Total = (scenes × per-image) + $1 prompt-generation overhead.&#10;Actual cost is finalised after generation based on images that succeeded.">
+              ⓘ
+            </button>
+          </div>
+          <div class="estimate-cost-total"><span id="est-cost-total">—</span></div>
+          <div class="estimate-cost-detail">
+            <span id="est-cost-per-image">—</span> × <span id="est-cost-scenes">—</span> images
+            + $<span id="est-cost-prompt">1.00</span> prompt overhead
+          </div>
+        </div>
+
         <div class="estimate-explainer">
           <p class="explainer-title">How duration is calculated</p>
           <p class="explainer-body">
@@ -349,6 +364,54 @@
     </div><!-- /form-layout -->
   </div>
 </section>
+
+<div id="cost-confirm-modal" class="modal-overlay" hidden>
+  <div class="modal-card modal-card--wide">
+    <h3>Confirm generation cost</h3>
+    <p class="modal-hint">Review your settings and the estimated spend before we kick off the OpenAI calls.</p>
+
+    <div class="cost-confirm-grid">
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Resolution</span>
+        <span class="cost-confirm-value" id="cc-resolution">—</span>
+      </div>
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Quality</span>
+        <span class="cost-confirm-value" id="cc-quality">—</span>
+      </div>
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Total scenes</span>
+        <span class="cost-confirm-value" id="cc-scenes">—</span>
+      </div>
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Per image</span>
+        <span class="cost-confirm-value" id="cc-per-image">—</span>
+      </div>
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Images subtotal</span>
+        <span class="cost-confirm-value" id="cc-images-subtotal">—</span>
+      </div>
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Prompt-gen overhead</span>
+        <span class="cost-confirm-value" id="cc-prompt-overhead">—</span>
+      </div>
+      <div class="cost-confirm-row cost-confirm-row--total">
+        <span class="cost-confirm-label">Estimated total</span>
+        <span class="cost-confirm-value" id="cc-total">—</span>
+      </div>
+    </div>
+
+    <p class="cost-confirm-note">
+      Cost is an estimate based on the OpenAI image price table you provided. Final cost is calculated
+      after generation completes and counted only against images that succeeded.
+    </p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost btn-sm" id="cc-cancel">Cancel</button>
+      <button type="button" class="btn btn-sm" id="cc-confirm">Confirm &amp; Generate</button>
+    </div>
+  </div>
+</div>
 
 <!-- ── Recent projects ────────────────────────────────────────────────────── -->
 {% if projects %}

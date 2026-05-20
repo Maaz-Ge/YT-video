@@ -39,3 +39,20 @@ RETRY_DELAY: float = 2.5
 # ── Storage ───────────────────────────────────────────────────────────────────
 PROJECTS_DIR: Path = Path(__file__).parent / "projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Pricing (USD per image) ──────────────────────────────────────────────────
+# Per-image cost lookup by resolution and quality (provided pricing table).
+IMAGE_COSTS: dict = {
+    "1280x720":  {"low": 0.003, "medium": 0.028, "high": 0.114},
+    "2048x1152": {"low": 0.005, "medium": 0.042, "high": 0.170},
+    "3840x2160": {"low": 0.011, "medium": 0.100, "high": 0.400},
+}
+
+# Flat one-time overhead per project for the scene-splitting + prompt-generation
+# LLM call (covers text-model usage outside the image API itself).
+PROMPT_GENERATION_FLAT_COST: float = 1.00
+
+# ── Regeneration queue ───────────────────────────────────────────────────────
+# Max simultaneous regeneration *image* renders (matches the OpenAI image
+# parallelism the provider supports). Additional jobs queue up.
+REGEN_PARALLELISM: int = 4

@@ -1945,3 +1945,341 @@ details > summary::-webkit-details-marker { display: none; }
   color: var(--text-3);
   border: 1px solid var(--border);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Cost panel · cost-confirm modal · regeneration jobs · export modal · lightbox
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Estimate cost block (index page) ────────────────────────────────────── */
+.estimate-cost {
+  margin-top: var(--sp-md);
+  padding: var(--sp-md);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.estimate-cost-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-sm);
+}
+.estimate-cost-eyebrow {
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.estimate-cost-total {
+  font-family: var(--ff-heading);
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--gold);
+  line-height: 1;
+}
+.estimate-cost-detail {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  line-height: 1.4;
+  font-family: var(--ff-mono);
+}
+
+/* ── Cost confirm modal ──────────────────────────────────────────────────── */
+.modal-card--wide { width: min(560px, 100%); }
+
+.cost-confirm-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin-bottom: var(--sp-md);
+}
+.cost-confirm-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 6px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.cost-confirm-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.cost-confirm-value {
+  font-family: var(--ff-mono);
+  font-size: 0.85rem;
+  color: var(--text-1);
+}
+.cost-confirm-row--total {
+  background: var(--gold-dim);
+  border-color: rgba(200, 146, 10, 0.35);
+}
+.cost-confirm-row--total .cost-confirm-value {
+  color: var(--gold);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.cost-confirm-note {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  line-height: 1.5;
+  margin-bottom: var(--sp-md);
+  font-style: italic;
+}
+
+/* ── Project settings: cost card ─────────────────────────────────────────── */
+.proj-setting--cost {
+  grid-column: span 2;
+  background: var(--gold-dim);
+  border-color: rgba(200, 146, 10, 0.3);
+}
+.proj-setting--cost .proj-setting-value {
+  color: var(--gold);
+  font-family: var(--ff-mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.proj-setting-sub {
+  font-size: 0.7rem;
+  color: var(--text-3);
+  font-family: var(--ff-mono);
+}
+
+/* ── Regeneration jobs panel ─────────────────────────────────────────────── */
+.regen-jobs-section { padding: 0 0 var(--sp-md) 0; }
+
+.regen-jobs-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-md) var(--sp-lg);
+}
+.regen-jobs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-md);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-sm);
+}
+.regen-jobs-meta {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  font-family: var(--ff-mono);
+}
+.regen-jobs-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.regen-job {
+  padding: 8px 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.regen-job--running { border-color: rgba(200, 146, 10, 0.35); }
+.regen-job--done { border-color: rgba(58, 122, 85, 0.4); opacity: 0.85; }
+.regen-job--error { border-color: rgba(180, 70, 70, 0.45); }
+
+.regen-job-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  flex-wrap: wrap;
+}
+.regen-job-slot {
+  font-family: var(--ff-mono);
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+.regen-job-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-2);
+  flex: 1;
+  flex-wrap: wrap;
+}
+.regen-job-state--done { color: var(--clr-ok); }
+.regen-job-state--error { color: var(--clr-err); }
+.regen-job-err { color: var(--clr-err); font-size: 0.7rem; }
+.regen-job-variant {
+  font-family: var(--ff-mono);
+  font-size: 0.68rem;
+  color: var(--text-3);
+}
+.regen-job-instr {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--text-3);
+  font-style: italic;
+  line-height: 1.4;
+}
+.btn-dismiss-regen {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.btn-dismiss-regen:hover { color: var(--text-1); border-color: var(--border-mid); }
+
+.regen-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--gold);
+  animation: spin 1s linear infinite;
+}
+
+/* Overlay on a scene card when a regeneration job is rendering its image. */
+.scene-regen-badge {
+  position: absolute;
+  left: var(--sp-sm);
+  bottom: var(--sp-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  background: rgba(7, 9, 10, 0.78);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(200, 146, 10, 0.4);
+  color: var(--gold);
+  font-family: var(--ff-mono);
+}
+
+/* Modal target line in the regen modal. */
+.regen-modal-target {
+  font-size: 0.72rem;
+  color: var(--gold);
+  font-family: var(--ff-mono);
+  margin-bottom: var(--sp-sm);
+}
+
+/* ── Export progress modal ───────────────────────────────────────────────── */
+.export-progress-track {
+  height: 8px;
+  background: var(--bg-3);
+  border-radius: 99px;
+  overflow: hidden;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+}
+.export-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold) 0%, var(--gold-dim) 100%);
+  transition: width 250ms var(--ease);
+}
+.export-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--ff-mono);
+  font-size: 0.72rem;
+  color: var(--text-3);
+  margin-bottom: var(--sp-md);
+}
+
+/* ── Scene image hover affordance + enlarge button ───────────────────────── */
+.scene-img-wrap--clickable { cursor: zoom-in; }
+.scene-img-wrap--clickable:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.scene-zoom-btn {
+  position: absolute;
+  right: var(--sp-sm);
+  bottom: var(--sp-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: rgba(7, 9, 10, 0.78);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-mid);
+  color: var(--text-2);
+  opacity: 0;
+  transition: opacity var(--dur-mid) var(--ease);
+  cursor: zoom-in;
+}
+.scene-img-wrap--clickable:hover .scene-zoom-btn,
+.scene-img-wrap--clickable:focus-within .scene-zoom-btn { opacity: 1; }
+
+/* ── Lightbox ────────────────────────────────────────────────────────────── */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: rgba(4, 6, 7, 0.92);
+  backdrop-filter: blur(12px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-xl);
+}
+.lightbox-overlay[hidden] { display: none !important; }
+.lightbox-figure {
+  margin: 0;
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-sm);
+}
+.lightbox-figure img {
+  max-width: 92vw;
+  max-height: 84vh;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: 0 14px 60px rgba(0, 0, 0, 0.6);
+}
+.lightbox-caption {
+  font-family: var(--ff-mono);
+  font-size: 0.78rem;
+  color: var(--text-2);
+  text-align: center;
+}
+.lightbox-close {
+  position: fixed;
+  top: var(--sp-lg);
+  right: var(--sp-lg);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(20, 22, 24, 0.85);
+  border: 1px solid var(--border-mid);
+  color: var(--text-1);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--dur-mid) var(--ease), background var(--dur-mid) var(--ease);
+}
+.lightbox-close:hover {
+  background: var(--bg-3);
+  transform: rotate(90deg);
+}
+body.body-lock { overflow: hidden; }

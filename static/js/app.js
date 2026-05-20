@@ -79,6 +79,30 @@ function copyPrompt(btn) {
 
 /* ── Live estimate (index page) ───────────────────────────────────────────── */
 
+const COST_FORMATTER = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 4,
+});
+
+function formatUSD(n) {
+  if (n == null || isNaN(n)) return "—";
+  return COST_FORMATTER.format(Number(n));
+}
+
+window._latestEstimate = null;
+
+function getSelectedResolution() {
+  const el = document.querySelector('input[name="resolution"]:checked');
+  return el ? el.value : "2048x1152";
+}
+
+function getSelectedQuality() {
+  const el = document.querySelector('input[name="quality"]:checked');
+  return el ? el.value : "medium";
+}
+
 function initEstimatePanel() {
   const scriptEl    = document.getElementById("script");
   const firstSlider = document.getElementById("first_rate_slider");
@@ -103,6 +127,10 @@ function initEstimatePanel() {
 
   scriptEl.addEventListener("input", () => { scheduleEstimate(); });
 
+  document.querySelectorAll('input[name="resolution"], input[name="quality"]').forEach((r) => {
+    r.addEventListener("change", scheduleEstimate);
+  });
+
   function scheduleEstimate() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(fetchEstimate, 300);
@@ -121,9 +149,10 @@ function initEstimatePanel() {
     const script    = scriptEl.value.trim();
     const firstRate = parseInt(firstInput.value, 10) || 3;
     const restRate  = parseInt(restInput.value,  10) || 2;
+    const resolution = getSelectedResolution();
+    const quality   = getSelectedQuality();
     const words     = script.split(/\s+/).filter(Boolean).length;
 
-    // Update inline analysis bar
     const anaWords    = document.getElementById("ana-words");
     const anaDuration = document.getElementById("ana-duration");
     const anaScenes   = document.getElementById("ana-scenes");
@@ -134,6 +163,7 @@ function initEstimatePanel() {
       if (anaDuration) anaDuration.textContent = "—";
       if (anaScenes)   anaScenes.textContent   = "—";
       if (anaHint)     anaHint.textContent      = "";
+      window._latestEstimate = null;
       clearEstimatePanel();
       return;
     }
@@ -142,12 +172,12 @@ function initEstimatePanel() {
       const res = await fetch("/api/estimate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, first_rate: firstRate, rest_rate: restRate }),
+        body: JSON.stringify({ script, first_rate: firstRate, rest_rate: restRate, resolution, quality }),
       });
       if (!res.ok) return;
       const data = await res.json();
+      window._latestEstimate = data;
 
-      // Inline analysis bar
       if (anaDuration) anaDuration.textContent = data.duration_minutes.toFixed(1);
       if (anaScenes)   anaScenes.textContent   = data.total_scenes;
       if (anaHint) {
@@ -158,7 +188,6 @@ function initEstimatePanel() {
           : "";
       }
 
-      // Estimate panel
       const estDuration = document.getElementById("est-duration");
       const estFirst    = document.getElementById("est-first-scenes");
       const estRest     = document.getElementById("est-rest-scenes");
@@ -179,6 +208,16 @@ function initEstimatePanel() {
         calcText.textContent =
           `${words.toLocaleString()} words ÷ 150 wpm = ${data.duration_minutes.toFixed(1)} min video`;
       }
+
+      const c = data.cost || {};
+      const costTotalEl = document.getElementById("est-cost-total");
+      const costPerEl   = document.getElementById("est-cost-per-image");
+      const costScenesEl= document.getElementById("est-cost-scenes");
+      const costPromptEl= document.getElementById("est-cost-prompt");
+      if (costTotalEl) costTotalEl.textContent = formatUSD(c.total_usd);
+      if (costPerEl)   costPerEl.textContent   = formatUSD(c.per_image_usd);
+      if (costScenesEl)costScenesEl.textContent= c.total_scenes != null ? c.total_scenes : "—";
+      if (costPromptEl)costPromptEl.textContent= (c.prompt_overhead_usd != null ? c.prompt_overhead_usd.toFixed(2) : "1.00");
     } catch (e) { /* silent */ }
   }
 
@@ -189,9 +228,14 @@ function initEstimatePanel() {
     });
     const ct = document.getElementById("est-calc-text");
     if (ct) ct.textContent = "Enter your script to see the estimate.";
+    const costTotalEl = document.getElementById("est-cost-total");
+    if (costTotalEl) costTotalEl.textContent = "—";
+    const costPerEl = document.getElementById("est-cost-per-image");
+    if (costPerEl) costPerEl.textContent = "—";
+    const costScenesEl = document.getElementById("est-cost-scenes");
+    if (costScenesEl) costScenesEl.textContent = "—";
   }
 
-  // Resolution selector → update style preview line live
   document.querySelectorAll('input[name="resolution"]').forEach((r) => {
     r.addEventListener("change", () => {
       const line = document.getElementById("style-res-line");
@@ -214,6 +258,92 @@ function initCreateForm() {
 
   if (!form) return;
 
+  function setSubmitting(busy) {
+    if (busy) {
+      submitLabel.textContent = "Launching generation…";
+      submitIcon.classList.add("hidden");
+      submitSpinner.classList.remove("hidden");
+      submitBtn.disabled = true;
+    } else {
+      submitLabel.textContent = "Generate Scenes";
+      submitIcon.classList.remove("hidden");
+      submitSpinner.classList.add("hidden");
+      submitBtn.disabled = false;
+    }
+  }
+
+  async function submitProject(payload) {
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Generation failed.");
+      showToast("Project created! Redirecting…", "ok", 2000);
+      setTimeout(() => {
+        window.location.href = `/projects/${data.project_id}`;
+      }, 600);
+    } catch (err) {
+      showToast(err.message, "error");
+      setSubmitting(false);
+    }
+  }
+
+  function fillCostConfirmModal(payload, estimate) {
+    const set = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = v;
+    };
+    set("cc-resolution", payload.resolution || "—");
+    set("cc-quality", payload.quality || "—");
+    const c = (estimate && estimate.cost) || null;
+    set("cc-scenes", estimate ? estimate.total_scenes : "—");
+    if (c) {
+      set("cc-per-image", formatUSD(c.per_image_usd));
+      set("cc-images-subtotal", formatUSD(c.images_subtotal_usd));
+      set("cc-prompt-overhead", formatUSD(c.prompt_overhead_usd));
+      set("cc-total", formatUSD(c.total_usd));
+    } else {
+      set("cc-per-image", "—");
+      set("cc-images-subtotal", "—");
+      set("cc-prompt-overhead", "—");
+      set("cc-total", "—");
+    }
+  }
+
+  function openCostConfirmModal(payload, estimate) {
+    const modal = document.getElementById("cost-confirm-modal");
+    if (!modal) {
+      submitProject(payload);
+      return;
+    }
+    fillCostConfirmModal(payload, estimate);
+    modal.hidden = false;
+
+    const cancelBtn = document.getElementById("cc-cancel");
+    const confirmBtn = document.getElementById("cc-confirm");
+
+    function close() {
+      modal.hidden = true;
+      cancelBtn.removeEventListener("click", onCancel);
+      confirmBtn.removeEventListener("click", onConfirm);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onEsc);
+    }
+    function onCancel() { close(); }
+    function onConfirm() { close(); submitProject(payload); }
+    function onBackdrop(e) { if (e.target === modal) close(); }
+    function onEsc(e) { if (e.key === "Escape") close(); }
+
+    cancelBtn.addEventListener("click", onCancel);
+    confirmBtn.addEventListener("click", onConfirm);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onEsc);
+  }
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
 
@@ -231,41 +361,29 @@ function initCreateForm() {
       return;
     }
 
-    // Collect form data
     const formData = new FormData(form);
     const payload  = Object.fromEntries(formData.entries());
 
-    // Show loading state
-    submitLabel.textContent = "Launching generation…";
-    submitIcon.classList.add("hidden");
-    submitSpinner.classList.remove("hidden");
-    submitBtn.disabled = true;
-
+    let estimate = window._latestEstimate;
     try {
-      const res = await fetch("/api/generate", {
+      const res = await fetch("/api/estimate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          script,
+          first_rate: parseInt(payload.first_rate, 10) || 3,
+          rest_rate:  parseInt(payload.rest_rate,  10) || 2,
+          resolution: payload.resolution,
+          quality:    payload.quality,
+        }),
       });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Generation failed.");
+      if (res.ok) {
+        estimate = await res.json();
+        window._latestEstimate = estimate;
       }
+    } catch (e) { /* fall back to last cached */ }
 
-      showToast("Project created! Redirecting…", "ok", 2000);
-      setTimeout(() => {
-        window.location.href = `/projects/${data.project_id}`;
-      }, 600);
-
-    } catch (err) {
-      showToast(err.message, "error");
-      submitLabel.textContent = "Generate Scenes";
-      submitIcon.classList.remove("hidden");
-      submitSpinner.classList.add("hidden");
-      submitBtn.disabled = false;
-    }
+    openCostConfirmModal(payload, estimate);
   });
 }
 
@@ -301,10 +419,12 @@ function initProjectPage() {
   const grid = document.getElementById("scene-grid");
   if (grid) {
     grid.addEventListener("click", onSceneGridClick);
+    grid.addEventListener("keydown", onSceneGridKey);
   }
 
   initRegenerateModal();
   initExportButton();
+  initLightbox();
 
   pollStatus();
 }
@@ -315,6 +435,7 @@ function pollDelayMs(data) {
   if (regenBusy) return 1200;
   if (!TERMINAL_STEPS.includes(step)) return 2000;
   if (data.export_blocked) return 3000;
+  if (Array.isArray(data.regeneration_jobs) && data.regeneration_jobs.length > 0) return 3000;
   return 6000;
 }
 
@@ -380,8 +501,34 @@ function onSceneGridClick(e) {
   if (reg) {
     const id = reg.getAttribute("data-entry-id");
     if (!id) return;
-    openRegenerateModal(id);
+    const card = reg.closest(".scene-card");
+    const slot = card ? card.querySelector(".scene-badge-num") : null;
+    openRegenerateModal(id, slot ? slot.textContent.trim() : null);
+    return;
   }
+
+  const lbTrigger = e.target.closest('[data-action="open-lightbox"]');
+  if (lbTrigger) {
+    const card = lbTrigger.closest(".scene-card");
+    if (card) openLightboxForCard(card);
+    return;
+  }
+
+  const dismiss = e.target.closest(".btn-dismiss-regen");
+  if (dismiss) {
+    const jid = dismiss.getAttribute("data-job-id");
+    if (jid) dismissRegenJob(jid);
+    return;
+  }
+}
+
+function onSceneGridKey(e) {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const lbTrigger = e.target.closest('[data-action="open-lightbox"]');
+  if (!lbTrigger) return;
+  e.preventDefault();
+  const card = lbTrigger.closest(".scene-card");
+  if (card) openLightboxForCard(card);
 }
 
 /* ── Status → UI ──────────────────────────────────────────────────────────── */
@@ -419,14 +566,12 @@ function applyStatus(data) {
     progressSection.style.display = step === "done" || step === "error" ? "none" : "block";
   }
 
-  const regBusy = document.getElementById("regen-busy-banner");
-  if (regBusy) {
-    regBusy.style.display =
-      data.regeneration && data.regeneration.busy ? "flex" : "none";
-  }
+  renderRegenJobsPanel(data.regeneration_jobs || [], data.regeneration);
+  updateProjectCostDisplay(data.cost_actual, data.cost_estimate);
 
   if (Array.isArray(data.scenes)) {
     syncSceneGrid(data.scenes);
+    annotateRegenTargets(data.scenes, data.regeneration_jobs || []);
     updateScenesHeader(data.scenes);
     updateExportAvailability(data);
   }
@@ -540,6 +685,25 @@ function updateSceneCardMedia(card, scene) {
       else wrap.insertBefore(img, wrap.firstChild);
     }
     img.src = `/projects/${window.PROJECT_ID}/images/${filename}?t=${stamp}`;
+    wrap.classList.add("scene-img-wrap--clickable");
+    if (!wrap.hasAttribute("data-action")) {
+      wrap.setAttribute("data-action", "open-lightbox");
+      wrap.setAttribute("role", "button");
+      wrap.setAttribute("tabindex", "0");
+    }
+    if (!wrap.querySelector(".scene-zoom-btn")) {
+      const zb = document.createElement("button");
+      zb.type = "button";
+      zb.className = "scene-zoom-btn";
+      zb.setAttribute("data-action", "open-lightbox");
+      zb.setAttribute("aria-label", "View image full screen");
+      zb.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 14 14" fill="none">' +
+        '<circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.4"/>' +
+        '<path d="M9 9l3 3M6 4v4M4 6h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+        "</svg>Enlarge";
+      wrap.appendChild(zb);
+    }
   }
   const pend = card.querySelector(".scene-pending-label");
   if (pend) {
@@ -593,9 +757,23 @@ function buildSceneCard(scene, idx) {
       ? `<div class="scene-dup-banner">Duplicate timestamp — keep one variant for export</div>`
       : "";
 
+  const zoomBtn = hasImage
+    ? `<button type="button" class="scene-zoom-btn" data-action="open-lightbox" aria-label="View image full screen">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M9 9l3 3M6 4v4M4 6h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        Enlarge
+      </button>`
+    : "";
+
   const imgBlock = hasImage
-    ? `<img src="/projects/${window.PROJECT_ID}/images/${filename}" alt="Scene ${num}" class="scene-img" loading="lazy" />`
+    ? `<img src="/projects/${window.PROJECT_ID}/images/${filename}" alt="Scene ${num}" class="scene-img" loading="lazy" />${zoomBtn}`
     : `<div class="scene-img-placeholder"><div class="placeholder-spinner"></div></div>`;
+
+  const wrapAttrs = hasImage
+    ? ' class="scene-img-wrap scene-img-wrap--clickable" role="button" tabindex="0" data-action="open-lightbox"'
+    : ' class="scene-img-wrap"';
 
   const abstractTag = scene.abstraction_mode
     ? `<span class="scene-abstract-tag">Abstract Mode</span>`
@@ -631,7 +809,7 @@ function buildSceneCard(scene, idx) {
 
   card.innerHTML = `
     ${dupBanner}
-    <div class="scene-img-wrap">
+    <div${wrapAttrs}>
       ${imgBlock}
       <div class="scene-pending-label" style="display:${pendDisplay}">Rendering…</div>
       <div class="scene-image-error" style="display:${errDisplay}">${escapeHTML(scene.image_error || "")}</div>
@@ -726,6 +904,9 @@ function updateExportAvailability(data) {
   }
 }
 
+let _exportJobId = null;
+let _exportPollTimer = null;
+
 function initExportButton() {
   const btn = document.getElementById("btn-export-zip");
   if (!btn) return;
@@ -733,7 +914,9 @@ function initExportButton() {
     if (btn.disabled) return;
     btn.disabled = true;
     try {
-      const res = await fetch(`/api/projects/${window.PROJECT_ID}/export.zip`);
+      const res = await fetch(`/api/projects/${window.PROJECT_ID}/exports`, {
+        method: "POST",
+      });
       if (res.status === 409) {
         const j = await res.json();
         showToast(
@@ -746,32 +929,156 @@ function initExportButton() {
         return;
       }
       if (!res.ok) {
-        let msg = "Export failed";
-        try {
-          const j = await res.json();
-          msg = j.error || msg;
-        } catch (e) { /* ignore */ }
+        let msg = "Could not start export";
+        try { const j = await res.json(); msg = j.error || msg; } catch (e) { /* ignore */ }
         showToast(msg, "error");
         btn.disabled = false;
         return;
       }
-      const blob = await res.blob();
-      const cd = res.headers.get("Content-Disposition") || "";
-      const m = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(cd);
-      let fname = "export.zip";
-      if (m && m[1]) fname = m[1].replace(/['"]/g, "");
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fname;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast("ZIP downloaded.", "ok");
+      const data = await res.json();
+      _exportJobId = data.job.job_id;
+      openExportModal();
+      pollExportStatus();
     } catch (e) {
       showToast("Export failed.", "error");
+      btn.disabled = false;
     }
-    btn.disabled = false;
   });
+
+  const closeBtn = document.getElementById("export-modal-close");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => closeExportModal(false));
+  }
+  const overlay = document.getElementById("export-modal");
+  if (overlay) {
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeExportModal(false);
+    });
+  }
+}
+
+function openExportModal() {
+  const modal = document.getElementById("export-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  setExportProgress(0, "Queued…", "");
+}
+
+function closeExportModal(success) {
+  const modal = document.getElementById("export-modal");
+  if (modal) modal.hidden = true;
+  clearTimeout(_exportPollTimer);
+  _exportPollTimer = null;
+  const btn = document.getElementById("btn-export-zip");
+  if (btn) btn.disabled = false;
+}
+
+function setExportProgress(percent, stage, count) {
+  const bar = document.getElementById("export-modal-bar");
+  const pct = document.getElementById("export-modal-percent");
+  const stageEl = document.getElementById("export-modal-stage");
+  const countEl = document.getElementById("export-modal-count");
+  if (bar) bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  if (pct) pct.textContent = `${Math.round(percent)}%`;
+  if (stageEl && stage) stageEl.textContent = stage;
+  if (countEl) countEl.textContent = count || "";
+}
+
+async function pollExportStatus() {
+  if (!_exportJobId) return;
+  try {
+    const res = await fetch(
+      `/api/projects/${window.PROJECT_ID}/exports/${_exportJobId}`
+    );
+    if (!res.ok) {
+      showToast("Lost the export job.", "error");
+      closeExportModal(false);
+      return;
+    }
+    const data = await res.json();
+    const job = data.job;
+    const total = job.total || 0;
+    const cur = job.current || 0;
+    const count = total ? `${cur} / ${total}` : "";
+    setExportProgress(job.percent || 0, job.message || job.stage || "Working…", count);
+
+    if (job.status === "done") {
+      setExportProgress(100, "Archive ready — downloading…", count);
+      triggerExportDownload(job);
+      return;
+    }
+    if (job.status === "error") {
+      const msg = job.error || "Export failed";
+      showToast(msg, "error", 8000);
+      const stageEl = document.getElementById("export-modal-stage");
+      if (stageEl) stageEl.textContent = msg;
+      const btn = document.getElementById("btn-export-zip");
+      if (btn) btn.disabled = false;
+      return;
+    }
+    _exportPollTimer = setTimeout(pollExportStatus, 700);
+  } catch (e) {
+    _exportPollTimer = setTimeout(pollExportStatus, 1500);
+  }
+}
+
+function triggerExportDownload(job) {
+  const url = `/api/projects/${window.PROJECT_ID}/exports/${_exportJobId}/file`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = job.file_name || "export.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast("ZIP downloaded.", "ok");
+  setTimeout(() => closeExportModal(true), 800);
+}
+
+/* ── Lightbox ─────────────────────────────────────────────────────────────── */
+
+function initLightbox() {
+  const lb = document.getElementById("lightbox");
+  const close = document.getElementById("lightbox-close");
+  if (!lb || !close) return;
+  close.addEventListener("click", closeLightbox);
+  lb.addEventListener("click", (e) => {
+    if (e.target === lb) closeLightbox();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!lb.hidden && e.key === "Escape") closeLightbox();
+  });
+}
+
+function openLightboxForCard(card) {
+  const lb = document.getElementById("lightbox");
+  const img = document.getElementById("lightbox-image");
+  const cap = document.getElementById("lightbox-caption");
+  if (!lb || !img) return;
+  const src = card.querySelector("img.scene-img");
+  if (!src || !src.src) return;
+  img.src = src.src;
+  img.alt = src.alt || "";
+  if (cap) {
+    const slot = card.querySelector(".scene-badge-num");
+    const time = card.querySelector(".scene-badge-time");
+    const variant = card.querySelector(".scene-badge-variant");
+    const parts = [];
+    if (slot) parts.push(`Scene ${slot.textContent.trim()}`);
+    if (variant) parts.push(variant.textContent.trim());
+    if (time) parts.push(time.textContent.trim());
+    cap.textContent = parts.join(" · ");
+  }
+  lb.hidden = false;
+  document.body.classList.add("body-lock");
+}
+
+function closeLightbox() {
+  const lb = document.getElementById("lightbox");
+  if (!lb) return;
+  lb.hidden = true;
+  document.body.classList.remove("body-lock");
+  const img = document.getElementById("lightbox-image");
+  if (img) img.src = "";
 }
 
 function initRegenerateModal() {
@@ -781,14 +1088,20 @@ function initRegenerateModal() {
   const ta = document.getElementById("regen-instructions");
   if (!modal || !cancel || !submit || !ta) return;
 
-  cancel.addEventListener("click", () => {
+  function close() {
     modal.hidden = true;
     _regenTargetEntryId = null;
     ta.value = "";
-  });
+  }
+
+  cancel.addEventListener("click", close);
 
   modal.addEventListener("click", (e) => {
-    if (e.target === modal) cancel.click();
+    if (e.target === modal) close();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !modal.hidden) close();
   });
 
   submit.addEventListener("click", async () => {
@@ -809,8 +1122,8 @@ function initRegenerateModal() {
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Regenerate request failed");
-      showToast("Regeneration started — new variant will appear shortly.", "ok", 5000);
-      cancel.click();
+      showToast("Added to the regeneration queue.", "ok", 4000);
+      close();
       pollStatus();
     } catch (e) {
       showToast(e.message, "error");
@@ -819,14 +1132,163 @@ function initRegenerateModal() {
   });
 }
 
-function openRegenerateModal(entryId) {
+function openRegenerateModal(entryId, slotLabel) {
   const modal = document.getElementById("regen-modal");
   const ta = document.getElementById("regen-instructions");
+  const target = document.getElementById("regen-modal-target");
   if (!modal || !ta) return;
   _regenTargetEntryId = entryId;
   ta.value = "";
+  if (target) {
+    target.textContent = slotLabel ? `Target: scene slot ${slotLabel}` : "";
+  }
   modal.hidden = false;
   ta.focus();
+}
+
+/* ── Regeneration jobs panel ─────────────────────────────────────────────── */
+
+const REGEN_STATE_LABEL = {
+  queued: "Queued — waiting for a worker",
+  refining_prompt: "Composing new prompt…",
+  generating_image: "Generating new image…",
+  done: "Done",
+  error: "Failed",
+};
+
+function renderRegenJobsPanel(jobs, regen) {
+  const section = document.getElementById("regen-jobs-section");
+  const list = document.getElementById("regen-jobs-list");
+  const activeEl = document.getElementById("regen-active-count");
+  const queuedEl = document.getElementById("regen-queued-count");
+  const maxEl = document.getElementById("regen-max-parallel");
+  if (!section || !list) return;
+
+  if (!jobs || jobs.length === 0) {
+    section.style.display = "none";
+    list.innerHTML = "";
+    return;
+  }
+  section.style.display = "block";
+
+  let active = 0;
+  let queued = 0;
+  jobs.forEach((j) => {
+    if (j.state === "refining_prompt" || j.state === "generating_image") active += 1;
+    else if (j.state === "queued") queued += 1;
+  });
+  if (activeEl) activeEl.textContent = active;
+  if (queuedEl) queuedEl.textContent = queued;
+  if (maxEl && regen && regen.max_parallel) maxEl.textContent = regen.max_parallel;
+
+  const existing = new Map();
+  list.querySelectorAll("li.regen-job").forEach((node) => {
+    existing.set(node.dataset.jobId, node);
+  });
+
+  const wanted = new Set(jobs.map((j) => j.job_id));
+  existing.forEach((node, jid) => {
+    if (!wanted.has(jid)) node.remove();
+  });
+
+  jobs.forEach((job) => {
+    let node = existing.get(job.job_id);
+    if (!node) {
+      node = document.createElement("li");
+      node.className = "regen-job";
+      node.dataset.jobId = job.job_id;
+      list.appendChild(node);
+    }
+    updateRegenJobNode(node, job);
+  });
+}
+
+function updateRegenJobNode(node, job) {
+  const state = job.state || "queued";
+  const isDone = state === "done";
+  const isErr = state === "error";
+  const slot = job.slot_number != null ? String(job.slot_number).padStart(2, "0") : "—";
+  const stage = job.stage_message || REGEN_STATE_LABEL[state] || state;
+  const errText = job.error ? ` · ${job.error}` : "";
+  const instr = (job.instructions || "").slice(0, 90);
+  const variantLabel =
+    job.variant_index != null && job.variant_index !== "" ? `Variant ${job.variant_index}` : "";
+
+  node.classList.toggle("regen-job--running", !isDone && !isErr);
+  node.classList.toggle("regen-job--done", isDone);
+  node.classList.toggle("regen-job--error", isErr);
+
+  node.innerHTML = `
+    <div class="regen-job-row">
+      <span class="regen-job-slot">Scene ${escapeHTML(slot)}</span>
+      <span class="regen-job-state regen-job-state--${escapeAttr(state)}">
+        ${!isDone && !isErr ? '<span class="regen-spinner"></span>' : ""}
+        ${escapeHTML(stage)}${errText ? `<span class="regen-job-err">${escapeHTML(errText)}</span>` : ""}
+      </span>
+      ${variantLabel ? `<span class="regen-job-variant">${escapeHTML(variantLabel)}</span>` : ""}
+      ${
+        (isDone || isErr)
+          ? `<button type="button" class="btn-dismiss-regen" data-job-id="${escapeAttr(job.job_id)}" aria-label="Dismiss">×</button>`
+          : ""
+      }
+    </div>
+    ${instr ? `<div class="regen-job-instr">“${escapeHTML(instr)}${(job.instructions || "").length > 90 ? "…" : ""}”</div>` : ""}
+  `;
+}
+
+async function dismissRegenJob(jobId) {
+  try {
+    const res = await fetch(`/api/projects/${window.PROJECT_ID}/regenerations/${jobId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new Error("Failed");
+    pollStatus();
+  } catch (e) { /* ignore */ }
+}
+
+function annotateRegenTargets(scenes, jobs) {
+  const grid = document.getElementById("scene-grid");
+  if (!grid) return;
+  grid.querySelectorAll(".scene-card .scene-regen-badge").forEach((el) => el.remove());
+
+  const byEntry = new Map();
+  jobs.forEach((j) => {
+    if (j.state === "done" || j.state === "error") return;
+    if (j.new_entry_id) byEntry.set(j.new_entry_id, j);
+  });
+
+  scenes.forEach((s) => {
+    if (!s.entry_id) return;
+    const job = byEntry.get(s.entry_id);
+    if (!job) return;
+    const card = document.getElementById(`scene-entry-${s.entry_id}`);
+    if (!card) return;
+    const wrap = card.querySelector(".scene-img-wrap");
+    if (!wrap) return;
+    const badge = document.createElement("div");
+    badge.className = "scene-regen-badge";
+    badge.innerHTML = `<span class="regen-spinner"></span>${escapeHTML(
+      job.stage_message || REGEN_STATE_LABEL[job.state] || ""
+    )}`;
+    wrap.appendChild(badge);
+  });
+}
+
+function updateProjectCostDisplay(actual, estimate) {
+  const valEl = document.getElementById("proj-cost-value");
+  const subEl = document.getElementById("proj-cost-sub");
+  if (!valEl || !subEl) return;
+  const c = actual || estimate;
+  if (!c) {
+    valEl.textContent = "—";
+    subEl.textContent = "awaiting plan";
+    return;
+  }
+  const isFinal = !!actual;
+  valEl.textContent = (isFinal ? "" : "~") + formatUSD(c.total_usd);
+  subEl.textContent =
+    (isFinal ? "Final · " : "Estimate · ") +
+    `${c.total_scenes} images × ${formatUSD(c.per_image_usd)} + ${formatUSD(c.prompt_overhead_usd)} prompt`;
 }
 
 /* ── Delete project ───────────────────────────────────────────────────────── */
