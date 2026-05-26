@@ -810,6 +810,65 @@ details > summary::-webkit-details-marker { display: none; }
 .toast-info  { border-left: 3px solid var(--clr-info); }
 
 /* ── Projects list on landing ─────────────────────────────────────────────── */
+.generation-locked-banner {
+  margin-bottom: var(--sp-lg);
+  padding: var(--sp-md) var(--sp-lg);
+  background: var(--gold-dim);
+  border: 1px solid rgba(200, 146, 10, 0.35);
+  border-radius: var(--r-lg);
+}
+.generation-locked-banner[hidden] { display: none !important; }
+.generation-locked-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-md);
+}
+.generation-locked-text {
+  font-size: 0.88rem;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.generation-locked-text strong { color: var(--gold); }
+
+.form-layout--locked {
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
+}
+
+.projects-tabs {
+  display: flex;
+  gap: var(--sp-xs);
+  margin-bottom: var(--sp-lg);
+  flex-wrap: wrap;
+}
+.projects-tab {
+  padding: 6px 14px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-3);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all var(--dur-mid) var(--ease);
+}
+.projects-tab:hover { color: var(--text-1); border-color: var(--border-mid); }
+.projects-tab.active {
+  background: var(--gold-dim);
+  border-color: rgba(200, 146, 10, 0.45);
+  color: var(--gold);
+}
+
+.projects-empty {
+  font-size: 0.85rem;
+  color: var(--text-3);
+  font-style: italic;
+  margin-bottom: var(--sp-md);
+}
+.projects-empty[hidden] { display: none !important; }
+
 .projects-section {
   padding: var(--sp-2xl) 0 6rem;
   border-top: 1px solid var(--border);
@@ -851,6 +910,7 @@ details > summary::-webkit-details-marker { display: none; }
 .project-status-dot.status-queued,
 .project-status-dot.status-analysing,
 .project-status-dot.status-prompting,
+.project-status-dot.status-prompting_done,
 .project-status-dot.status-generating { background: var(--gold); animation: pulse-dot 2s ease-in-out infinite; }
 
 .project-quality-tag {

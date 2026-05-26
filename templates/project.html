@@ -162,7 +162,11 @@
 </div>
 
 <!-- ── Progress section ───────────────────────────────────────────────────── -->
-<section class="progress-section" id="progress-section">
+<section
+  class="progress-section"
+  id="progress-section"
+  {% if not is_generating %}style="display:none"{% endif %}
+>
   <div class="container">
 
     <div class="step-track" id="step-track">
@@ -189,18 +193,18 @@
 
     <div class="progress-bar-wrap">
       <div class="progress-bar-track">
-        <div class="progress-bar-fill" id="progress-bar" style="width:0%"></div>
+        <div class="progress-bar-fill" id="progress-bar" style="width:{{ state.get('progress', 0) }}%"></div>
       </div>
       <div class="progress-bar-meta">
-        <span id="progress-message">Initialising…</span>
-        <span id="progress-pct">0%</span>
+        <span id="progress-message">{{ state.get('message') or 'Initialising…' }}</span>
+        <span id="progress-pct">{{ state.get('progress', 0) }}%</span>
       </div>
     </div>
 
-    <div class="image-counter" id="image-counter" style="display:none">
-      <span id="counter-done">0</span>
+    <div class="image-counter" id="image-counter" style="display:{% if state.get('step') == 'generating' %}flex{% else %}none{% endif %}">
+      <span id="counter-done">{{ state.get('scenes_done', 0) }}</span>
       <span class="counter-sep">/</span>
-      <span id="counter-total">0</span>
+      <span id="counter-total">{{ state.get('total_scenes', 0) }}</span>
       <span class="counter-label">images rendered</span>
     </div>
 
@@ -493,6 +497,7 @@
   window.PROJECT_ID     = "{{ project.id }}";
   window.INIT_STEP      = "{{ state.get('step', 'queued') }}";
   window.INIT_PROGRESS  = {{ state.get('progress', 0) }};
+  window.INIT_MESSAGE   = {{ (state.get('message') or '') | tojson }};
   window.SCENE_TYPE_NAMES  = {{ scene_type_names | tojson }};
   window.SCENE_TYPE_COLORS = {{ scene_type_colors | tojson }};
   window.PERIOD_LABELS     = {{ period_labels | tojson }};

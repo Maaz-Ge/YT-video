@@ -197,6 +197,51 @@ def _scene_lock(project_id: str) -> threading.Lock:
         return lk
 
 
+# Steps where the initial batch generation worker is still running.
+ACTIVE_GENERATION_STEPS = frozenset({
+    "queued",
+    "analysing",
+    "prompting",
+    "prompting_done",
+    "generating",
+})
+
+
+def _step_is_generating(step: str | None) -> bool:
+    return bool(step and step in ACTIVE_GENERATION_STEPS)
+
+
+def _find_active_generation() -> dict | None:
+    """Return the first in-flight batch-generation project (reads status.json on disk)."""
+    for d in sorted(
+        config.PROJECTS_DIR.iterdir(),
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
+    ):
+        if not d.is_dir():
+            continue
+        meta = _load_meta(d.name)
+        if not meta:
+            continue
+        state = _get_state(d.name) or {}
+        step = state.get("step", "unknown")
+        if not _step_is_generating(step):
+            continue
+        plan = meta.get("scene_plan") or {}
+        return {
+            "id": d.name,
+            "name": meta.get("name", "Untitled"),
+            "step": step,
+            "progress": int(state.get("progress") or 0),
+            "message": state.get("message") or "",
+            "total_scenes": state.get("total_scenes")
+            or plan.get("total_scenes")
+            or 0,
+            "scenes_done": state.get("scenes_done") or 0,
+        }
+    return None
+
+
 def _list_projects() -> list[dict]:
     projects = []
     for d in sorted(config.PROJECTS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
@@ -204,18 +249,34 @@ def _list_projects() -> list[dict]:
             meta = _load_meta(d.name)
             state = _get_state(d.name)
             if meta:
+                plan = meta.get("scene_plan") or {}
+                step = state.get("step", "unknown") if state else "unknown"
                 projects.append({
                     "id": d.name,
                     "name": meta.get("name", "Untitled"),
                     "style": meta.get("style", "Tatterveil"),
                     "quality": meta.get("quality", "medium"),
-                    "total_scenes": meta.get("scene_plan", {}).get("total_scenes", 0),
-                    "duration_minutes": meta.get("scene_plan", {}).get("duration_minutes", 0),
-                    "step": state.get("step", "unknown") if state else "unknown",
-                    "progress": state.get("progress", 0) if state else 0,
+                    "total_scenes": plan.get("total_scenes")
+                    or (state.get("total_scenes") if state else 0)
+                    or 0,
+                    "duration_minutes": plan.get("duration_minutes", 0),
+                    "step": step,
+                    "progress": int(state.get("progress") or 0) if state else 0,
+                    "message": (state.get("message") or "") if state else "",
+                    "is_generating": _step_is_generating(step),
                     "created_at": meta.get("created_at", 0),
                 })
     return projects
+
+
+def _projects_api_payload() -> dict:
+    projects = _list_projects()
+    active = _find_active_generation()
+    return {
+        "projects": projects,
+        "active_generation": active,
+        "generation_locked": active is not None,
+    }
 
 
 # ─── Background generation worker ────────────────────────────────────────────
@@ -914,8 +975,19 @@ def _run_regen_job(job_id: str) -> None:
 
 @app.route("/")
 def index():
-    projects = _list_projects()
-    return render_template("index.html", projects=projects)
+    payload = _projects_api_payload()
+    return render_template(
+        "index.html",
+        projects=payload["projects"],
+        active_generation=payload["active_generation"],
+        generation_locked=payload["generation_locked"],
+    )
+
+
+@app.route("/api/projects")
+def api_list_projects():
+    """JSON project list + whether a new batch generation may be started."""
+    return jsonify(_projects_api_payload())
 
 
 @app.route("/api/estimate", methods=["POST"])
@@ -968,6 +1040,23 @@ def api_generate():
         return jsonify({"error": f"Invalid resolution. Choose: {list(config.RESOLUTION_PRESETS)}"}), 400
     first_rate = max(1, min(first_rate, 10))
     rest_rate = max(1, min(rest_rate, 10))
+
+    active = _find_active_generation()
+    if active:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Another project is still generating. "
+                        "Wait for it to finish or open it from Recent Projects."
+                    ),
+                    "active_project_id": active["id"],
+                    "active_project_name": active.get("name"),
+                    "progress": active.get("progress"),
+                }
+            ),
+            409,
+        )
 
     project_id = uuid.uuid4().hex
     project_dir = config.PROJECTS_DIR / project_id
@@ -1076,6 +1165,7 @@ def project_view(project_id: str):
         and step in ("done", "error")
         and has_done_image
     )
+    is_generating = _step_is_generating(step)
     return render_template(
         "project.html",
         project=meta,
@@ -1084,6 +1174,7 @@ def project_view(project_id: str):
         duplicate_slots=duplicate_slots,
         export_available=export_available,
         timing=timing,
+        is_generating=is_generating,
         cost_estimate=meta.get("cost_estimate"),
         cost_actual=meta.get("cost_actual"),
         regen_parallelism=int(config.REGEN_PARALLELISM),

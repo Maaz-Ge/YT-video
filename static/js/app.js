@@ -281,6 +281,18 @@ function initCreateForm() {
         body: JSON.stringify(payload),
       });
       const data = await res.json();
+      if (res.status === 409) {
+        const pid = data.active_project_id;
+        const msg = data.error || "Another project is still generating.";
+        showToast(msg, "error", 7000);
+        if (pid) {
+          setTimeout(() => {
+            window.location.href = `/projects/${pid}`;
+          }, 800);
+        }
+        setSubmitting(false);
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Generation failed.");
       showToast("Project created! Redirecting…", "ok", 2000);
       setTimeout(() => {
@@ -402,19 +414,26 @@ function initProjectPage() {
   if (typeof window.PROJECT_ID === "undefined") return;
 
   const step = typeof window.INIT_STEP === "string" ? window.INIT_STEP : "queued";
+  const progress = typeof window.INIT_PROGRESS === "number" ? window.INIT_PROGRESS : 0;
   const progressSection = document.getElementById("progress-section");
-  if (progressSection && (step === "done" || step === "error")) {
-    progressSection.style.display = "none";
+  if (progressSection) {
+    progressSection.style.display =
+      step === "done" || step === "error" ? "none" : "block";
   }
   const bar = document.getElementById("progress-bar");
-  if (bar != null && typeof window.INIT_PROGRESS === "number") {
-    bar.style.width = `${window.INIT_PROGRESS}%`;
-    _lastProgress = window.INIT_PROGRESS;
+  if (bar != null) {
+    bar.style.width = `${progress}%`;
+    _lastProgress = progress;
   }
   const pctEl = document.getElementById("progress-pct");
-  if (pctEl != null && typeof window.INIT_PROGRESS === "number") {
-    pctEl.textContent = `${Math.round(window.INIT_PROGRESS)}%`;
+  if (pctEl != null) {
+    pctEl.textContent = `${Math.round(progress)}%`;
   }
+  const msgEl = document.getElementById("progress-message");
+  if (msgEl && typeof window.INIT_MESSAGE === "string" && window.INIT_MESSAGE) {
+    msgEl.textContent = window.INIT_MESSAGE;
+  }
+  updateStepTrack(step);
 
   const grid = document.getElementById("scene-grid");
   if (grid) {
@@ -1291,6 +1310,208 @@ function updateProjectCostDisplay(actual, estimate) {
     `${c.total_scenes} images × ${formatUSD(c.per_image_usd)} + ${formatUSD(c.prompt_overhead_usd)} prompt`;
 }
 
+/* ── Home page: project list polling + generation lock ───────────────────── */
+
+let _homePollTimer = null;
+let _projectsFilter = "all";
+
+function initHomePage() {
+  const grid = document.getElementById("projects-grid");
+  if (!grid) return;
+
+  document.querySelectorAll(".projects-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      _projectsFilter = tab.getAttribute("data-filter") || "all";
+      document.querySelectorAll(".projects-tab").forEach((t) => {
+        const on = t === tab;
+        t.classList.toggle("active", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      applyProjectsFilter();
+    });
+  });
+
+  applyProjectsFilter();
+  pollHomeProjects();
+}
+
+function applyProjectsFilter() {
+  const grid = document.getElementById("projects-grid");
+  const filterEmpty = document.getElementById("projects-filter-empty");
+  if (!grid) return;
+
+  let visible = 0;
+  grid.querySelectorAll(".project-card").forEach((card) => {
+    const group = card.getAttribute("data-filter-group") || "complete";
+    let show = true;
+    if (_projectsFilter === "in_progress") show = group === "in_progress";
+    else if (_projectsFilter === "complete") show = group === "complete";
+    card.style.display = show ? "" : "none";
+    if (show) visible += 1;
+  });
+
+  if (filterEmpty) {
+    const total = grid.querySelectorAll(".project-card").length;
+    filterEmpty.hidden = total === 0 || visible > 0 || _projectsFilter === "all";
+  }
+}
+
+function applyGenerationLock(locked, active) {
+  const banner = document.getElementById("generation-locked-banner");
+  const submitBtn = document.getElementById("submit-btn");
+  const layout = document.querySelector(".form-layout");
+  const pctEl = document.getElementById("generation-locked-pct");
+  const link = document.getElementById("generation-locked-link");
+
+  if (banner) banner.hidden = !locked;
+  if (submitBtn) {
+    submitBtn.disabled = !!locked;
+    submitBtn.setAttribute("aria-disabled", locked ? "true" : "false");
+  }
+  if (layout) layout.classList.toggle("form-layout--locked", !!locked);
+
+  if (locked && active) {
+    if (pctEl) pctEl.textContent = String(active.progress ?? 0);
+    if (link) link.href = `/projects/${active.id}`;
+  }
+}
+
+function updateProjectCard(card, p) {
+  const step = p.step || "unknown";
+  const generating = !!p.is_generating;
+  card.setAttribute("data-step", step);
+  card.setAttribute("data-generating", generating ? "1" : "0");
+  card.setAttribute(
+    "data-filter-group",
+    generating ? "in_progress" : step === "done" || step === "error" ? "complete" : "complete"
+  );
+
+  const dot = card.querySelector(".project-status-dot");
+  if (dot) {
+    dot.className = `project-status-dot status-${step}`;
+  }
+
+  const scenesEl = card.querySelector(".project-scenes");
+  if (scenesEl && p.total_scenes != null) scenesEl.textContent = `${p.total_scenes} scenes`;
+
+  const durEl = card.querySelector(".project-duration");
+  if (durEl && p.duration_minutes != null) {
+    durEl.textContent = `${Number(p.duration_minutes).toFixed(1)} min`;
+  }
+
+  const stateEl = card.querySelector(".project-state");
+  if (stateEl) {
+    stateEl.classList.remove("done", "error", "processing");
+    if (step === "done") {
+      stateEl.classList.add("done");
+      stateEl.textContent = "Complete";
+      stateEl.removeAttribute("data-progress");
+    } else if (step === "error") {
+      stateEl.classList.add("error");
+      stateEl.textContent = "Failed";
+      stateEl.removeAttribute("data-progress");
+    } else {
+      stateEl.classList.add("processing");
+      stateEl.setAttribute("data-progress", "1");
+      stateEl.textContent = `${p.progress ?? 0}% — Processing`;
+    }
+  }
+}
+
+function buildProjectCard(p) {
+  const step = p.step || "unknown";
+  const generating = !!p.is_generating;
+  const filterGroup = generating
+    ? "in_progress"
+    : step === "done" || step === "error"
+      ? "complete"
+      : "complete";
+
+  let stateHtml;
+  if (step === "done") {
+    stateHtml = '<span class="project-state done">Complete</span>';
+  } else if (step === "error") {
+    stateHtml = '<span class="project-state error">Failed</span>';
+  } else {
+    stateHtml = `<span class="project-state processing" data-progress>${p.progress ?? 0}% — Processing</span>`;
+  }
+
+  const card = document.createElement("a");
+  card.href = `/projects/${p.id}`;
+  card.className = "project-card";
+  card.dataset.projectId = p.id;
+  card.dataset.step = step;
+  card.dataset.generating = generating ? "1" : "0";
+  card.dataset.filterGroup = filterGroup;
+  card.innerHTML = `
+    <div class="project-card-top">
+      <span class="project-status-dot status-${escapeAttr(step)}"></span>
+      <span class="project-quality-tag">${escapeHTML(p.quality || "medium")}</span>
+    </div>
+    <h3 class="project-card-name">${escapeHTML(p.name || "Untitled")}</h3>
+    <div class="project-card-meta">
+      <span class="project-scenes">${p.total_scenes ?? 0} scenes</span>
+      <span class="meta-sep">·</span>
+      <span class="project-duration">${Number(p.duration_minutes || 0).toFixed(1)} min</span>
+      <span class="meta-sep">·</span>
+      <span>${escapeHTML(p.style || "Tatterveil")}</span>
+    </div>
+    <div class="project-card-footer">
+      ${stateHtml}
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+  `;
+  return card;
+}
+
+async function pollHomeProjects() {
+  try {
+    const res = await fetch("/api/projects");
+    if (!res.ok) {
+      scheduleHomePoll(8000);
+      return;
+    }
+    const data = await res.json();
+    const projects = data.projects || [];
+    const grid = document.getElementById("projects-grid");
+    const empty = document.getElementById("projects-empty");
+
+    if (empty) empty.hidden = projects.length > 0;
+
+    if (grid) {
+      const existing = new Map();
+      grid.querySelectorAll(".project-card").forEach((c) => {
+        existing.set(c.dataset.projectId, c);
+      });
+
+      projects.forEach((p) => {
+        let card = existing.get(p.id);
+        if (!card) {
+          card = buildProjectCard(p);
+          grid.insertBefore(card, grid.firstChild);
+        } else {
+          updateProjectCard(card, p);
+        }
+      });
+    }
+
+    applyGenerationLock(!!data.generation_locked, data.active_generation);
+    applyProjectsFilter();
+
+    const needsFast =
+      data.generation_locked ||
+      projects.some((p) => p.is_generating);
+    scheduleHomePoll(needsFast ? 2500 : 12000);
+  } catch (e) {
+    scheduleHomePoll(8000);
+  }
+}
+
+function scheduleHomePoll(ms) {
+  clearTimeout(_homePollTimer);
+  _homePollTimer = setTimeout(pollHomeProjects, ms);
+}
+
 /* ── Delete project ───────────────────────────────────────────────────────── */
 
 function initDeleteButton() {
@@ -1333,6 +1554,7 @@ function escapeAttr(str) {
 document.addEventListener("DOMContentLoaded", () => {
   initEstimatePanel();
   initCreateForm();
+  initHomePage();
   initProjectPage();
   initDeleteButton();
 

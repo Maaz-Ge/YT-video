@@ -82,6 +82,29 @@
     <p class="section-label animate-fade-up">New Project</p>
     <h2 class="section-title animate-fade-up">Generate your scenes</h2>
 
+    <div
+      id="generation-locked-banner"
+      class="generation-locked-banner animate-fade-up"
+      {% if not generation_locked %}hidden{% endif %}
+    >
+      <div class="generation-locked-inner">
+        <span class="generation-locked-text" id="generation-locked-text">
+          {% if active_generation %}
+          <strong>{{ active_generation.name }}</strong> is generating
+          (<span id="generation-locked-pct">{{ active_generation.progress }}</span>%).
+          Finish it before starting another project.
+          {% else %}
+          A project is currently generating. Finish it before starting another.
+          {% endif %}
+        </span>
+        <a
+          href="{% if active_generation %}/projects/{{ active_generation.id }}{% else %}#projects{% endif %}"
+          class="btn btn-sm"
+          id="generation-locked-link"
+        >Open in-progress project</a>
+      </div>
+    </div>
+
     <div class="form-layout animate-fade-up">
       <!-- Left: form -->
       <form id="create-form" class="create-form" novalidate>
@@ -273,7 +296,12 @@
         </div>
 
         <!-- Submit -->
-        <button type="submit" class="btn btn-primary btn-submit" id="submit-btn">
+        <button
+          type="submit"
+          class="btn btn-primary btn-submit"
+          id="submit-btn"
+          {% if generation_locked %}disabled aria-disabled="true"{% endif %}
+        >
           <span id="submit-label">Generate Scenes</span>
           <svg id="submit-icon" width="18" height="18" viewBox="0 0 18 18" fill="none">
             <path d="M3 9h12M11 5l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -414,23 +442,44 @@
 </div>
 
 <!-- ── Recent projects ────────────────────────────────────────────────────── -->
-{% if projects %}
 <section class="projects-section" id="projects">
   <div class="container">
     <p class="section-label animate-fade-up">Your work</p>
     <h2 class="section-title animate-fade-up">Recent Projects</h2>
-    <div class="projects-grid">
+
+    <div class="projects-tabs animate-fade-up" role="tablist" aria-label="Filter projects">
+      <button type="button" class="projects-tab active" data-filter="all" role="tab" aria-selected="true">All</button>
+      <button type="button" class="projects-tab" data-filter="in_progress" role="tab" aria-selected="false">In progress</button>
+      <button type="button" class="projects-tab" data-filter="complete" role="tab" aria-selected="false">Complete</button>
+    </div>
+
+    <p class="projects-empty" id="projects-empty" {% if projects %}hidden{% endif %}>
+      No projects yet. Create one above to get started.
+    </p>
+    <p class="projects-empty" id="projects-filter-empty" hidden>
+      No projects match this filter.
+    </p>
+
+    <div class="projects-grid" id="projects-grid">
       {% for p in projects %}
-      <a href="/projects/{{ p.id }}" class="project-card animate-fade-up" style="--delay:{{ loop.index0 * 0.05 }}s">
+      <a
+        href="/projects/{{ p.id }}"
+        class="project-card animate-fade-up"
+        style="--delay:{{ loop.index0 * 0.05 }}s"
+        data-project-id="{{ p.id }}"
+        data-step="{{ p.step }}"
+        data-generating="{{ '1' if p.is_generating else '0' }}"
+        data-filter-group="{% if p.step == 'done' %}complete{% elif p.step == 'error' %}complete{% elif p.is_generating %}in_progress{% else %}complete{% endif %}"
+      >
         <div class="project-card-top">
           <span class="project-status-dot status-{{ p.step }}"></span>
           <span class="project-quality-tag">{{ p.quality }}</span>
         </div>
         <h3 class="project-card-name">{{ p.name }}</h3>
         <div class="project-card-meta">
-          <span>{{ p.total_scenes }} scenes</span>
+          <span class="project-scenes">{{ p.total_scenes }} scenes</span>
           <span class="meta-sep">·</span>
-          <span>{{ "%.1f"|format(p.duration_minutes) }} min</span>
+          <span class="project-duration">{{ "%.1f"|format(p.duration_minutes) }} min</span>
           <span class="meta-sep">·</span>
           <span>{{ p.style }}</span>
         </div>
@@ -440,7 +489,7 @@
           {% elif p.step == "error" %}
             <span class="project-state error">Failed</span>
           {% else %}
-            <span class="project-state processing">{{ p.progress }}% — Processing</span>
+            <span class="project-state processing" data-progress>{{ p.progress }}% — Processing</span>
           {% endif %}
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </div>
@@ -449,6 +498,5 @@
     </div>
   </div>
 </section>
-{% endif %}
 
 {% endblock %}
