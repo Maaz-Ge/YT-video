@@ -16,8 +16,14 @@ def image_filename_for_scene(scene: dict[str, Any]) -> str:
     return f"scene_{slot:03d}_v{v}.png"
 
 
+def voice_filename_for_scene(scene: dict[str, Any]) -> str:
+    """One voice-over per timeline slot (variants share the same audio)."""
+    slot = int(scene.get("slot_number") or scene.get("scene_number") or 1)
+    return f"scene_{slot:03d}.wav"
+
+
 def ensure_scene_entries(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ensure every scene row has entry_id, slot_number, variant_index, image_filename."""
+    """Ensure every scene row has entry_id, slot_number, variant_index, image_filename, voice_filename."""
     out: list[dict[str, Any]] = []
     for i, raw in enumerate(scenes):
         s = dict(raw)
@@ -34,6 +40,16 @@ def ensure_scene_entries(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         s["image_filename"] = fn
         if not s.get("image_path"):
             s["image_path"] = f"images/{fn}"
+
+        # Voice-over fields (one per slot; variants reuse).
+        vn = voice_filename_for_scene(s)
+        if not s.get("voice_filename"):
+            s["voice_filename"] = vn
+        if not s.get("voice_path"):
+            s["voice_path"] = f"voiceovers/{s['voice_filename']}"
+        s.setdefault("voice_status", "pending")
+        s.setdefault("voice_error", None)
+        s.setdefault("voice_seconds", None)
         out.append(s)
     return out
 

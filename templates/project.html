@@ -411,6 +411,39 @@
               {% endif %}
             </div>
 
+            <div class="scene-voice" data-slot="{{ slot }}">
+              <p class="scene-section-label scene-voice-label">
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                  <path d="M3 4v3M5.5 2.5v6M8 4v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                </svg>
+                Voice-over
+                {% if s.voice_status == 'done' %}
+                  <span class="scene-voice-tag scene-voice-tag--ok">ready</span>
+                {% elif s.voice_status == 'error' %}
+                  <span class="scene-voice-tag scene-voice-tag--err">failed</span>
+                {% elif s.voice_status == 'skipped' %}
+                  <span class="scene-voice-tag scene-voice-tag--skip">skipped</span>
+                {% else %}
+                  <span class="scene-voice-tag">queued</span>
+                {% endif %}
+              </p>
+              {% if s.voice_status == 'done' and s.voice_path %}
+                {% set v_file = s.voice_path.replace('\\', '/').split('/')[-1] %}
+                <audio
+                  class="scene-voice-audio"
+                  controls
+                  preload="none"
+                  src="/projects/{{ project.id }}/voiceovers/{{ v_file }}"
+                ></audio>
+              {% elif s.voice_status == 'error' %}
+                <p class="scene-voice-error">{{ s.voice_error or 'Voice generation failed.' }}</p>
+              {% elif s.voice_status == 'skipped' %}
+                <p class="scene-voice-hint">Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.</p>
+              {% else %}
+                <p class="scene-voice-hint">Voice-over will render after images finish…</p>
+              {% endif %}
+            </div>
+
             <div class="scene-card-actions">
               <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="{{ s.entry_id }}" {% if s.image_status != 'done' %}disabled{% endif %}>Regenerate</button>
               <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}">Delete variant</button>

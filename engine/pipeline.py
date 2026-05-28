@@ -118,19 +118,129 @@ def _robust_parse(raw: str) -> list[dict]:
     raise ValueError("Could not parse scene JSON from LLM response")
 
 
+def _equal_chunks(start: int, end: int, n: int) -> list[tuple[int, int]]:
+    """Split index range [start, end) into n roughly-equal (a, b) pairs."""
+    length = max(0, end - start)
+    if n <= 0:
+        return []
+    boundaries = [start + round(i * length / n) for i in range(n + 1)]
+    return [(boundaries[i], boundaries[i + 1]) for i in range(n)]
+
+
+def compute_equal_segments(script: str, scene_plan: dict) -> list[dict]:
+    """
+    Deterministically split the script into scenes so that:
+      • Each scene **within** the first 5 minutes covers the same number of words.
+      • Each scene **within** the remaining duration covers the same number of words.
+      • Time per scene is equal within each segment.
+
+    Returns a list of dicts with: scene_number, slot_number, start_time, end_time,
+    duration, script_segment, word_count.
+    """
+    tokens = script.split()
+    n_total = len(tokens)
+    first_n = int(scene_plan.get("first_segment_scenes", 0) or 0)
+    rest_n = int(scene_plan.get("rest_segment_scenes", 0) or 0)
+    first_min = float(scene_plan.get("first_segment_minutes", 0) or 0.0)
+    rest_min = float(scene_plan.get("rest_segment_minutes", 0) or 0.0)
+    total_min = first_min + rest_min
+
+    if n_total == 0 or total_min <= 0 or (first_n + rest_n) == 0:
+        return []
+
+    # Word budget per segment, proportional to time.
+    if rest_n > 0 and rest_min > 0:
+        split_idx = round(n_total * first_min / total_min)
+    else:
+        split_idx = n_total
+    split_idx = max(0, min(n_total, split_idx))
+
+    segments: list[dict] = []
+    scene_no = 1
+
+    # ── First segment ──
+    if first_n > 0:
+        chunks = _equal_chunks(0, split_idx, first_n)
+        seg_secs = first_min * 60.0
+        per_scene_secs = seg_secs / first_n
+        for i, (a, b) in enumerate(chunks):
+            start_t = i * per_scene_secs
+            end_t = seg_secs if i == first_n - 1 else (i + 1) * per_scene_secs
+            seg_text = " ".join(tokens[a:b]).strip()
+            segments.append(
+                {
+                    "scene_number": scene_no,
+                    "slot_number": scene_no,
+                    "start_time": round(start_t, 2),
+                    "end_time": round(end_t, 2),
+                    "duration": round(end_t - start_t, 2),
+                    "script_segment": seg_text,
+                    "word_count": (b - a),
+                }
+            )
+            scene_no += 1
+
+    # ── Rest segment ──
+    if rest_n > 0 and rest_min > 0:
+        chunks = _equal_chunks(split_idx, n_total, rest_n)
+        base = first_min * 60.0
+        seg_secs = rest_min * 60.0
+        per_scene_secs = seg_secs / rest_n
+        for i, (a, b) in enumerate(chunks):
+            start_t = base + i * per_scene_secs
+            end_t = base + seg_secs if i == rest_n - 1 else base + (i + 1) * per_scene_secs
+            seg_text = " ".join(tokens[a:b]).strip()
+            segments.append(
+                {
+                    "scene_number": scene_no,
+                    "slot_number": scene_no,
+                    "start_time": round(start_t, 2),
+                    "end_time": round(end_t, 2),
+                    "duration": round(end_t - start_t, 2),
+                    "script_segment": seg_text,
+                    "word_count": (b - a),
+                }
+            )
+            scene_no += 1
+
+    return segments
+
+
 def split_and_prompt(
     title: str,
     script: str,
     scene_plan: dict,
 ) -> list[dict]:
     """
-    Call the LLM once to split the script into scenes and generate a
-    Tatterveil-style image prompt for every scene.
-    Returns a list of scene dicts.
+    Two-stage scene build:
+
+    1. Deterministically split the script into equal-word segments using
+       compute_equal_segments() — guarantees equal scene length within each
+       segment of the timeline.
+    2. Ask the LLM to enrich each pre-split scene with scene_type, time_period,
+       abstraction info, and the image prompt — without re-splitting the script.
     """
     scene_count = scene_plan["total_scenes"]
     duration_minutes = scene_plan["duration_minutes"]
     duration_seconds = scene_plan["duration_seconds"]
+
+    pre_segments = compute_equal_segments(script, scene_plan)
+    if not pre_segments:
+        raise RuntimeError(
+            "Could not split script into scenes — empty script or invalid scene plan."
+        )
+
+    # Compact list passed to the LLM: it must NOT change scene_number, timing or text.
+    locked_payload = [
+        {
+            "scene_number": p["scene_number"],
+            "start_time": p["start_time"],
+            "end_time": p["end_time"],
+            "duration": p["duration"],
+            "script_segment": p["script_segment"],
+        }
+        for p in pre_segments
+    ]
 
     system_prompt = SCENE_SPLIT_SYSTEM_PROMPT.format(
         scene_count=scene_count,
@@ -142,7 +252,13 @@ def split_and_prompt(
         f"VIDEO TITLE: {title}\n"
         f"TOTAL DURATION: {duration_minutes:.2f} minutes ({duration_seconds:.0f} seconds)\n"
         f"SCENE COUNT: {scene_count}\n\n"
-        f"SCRIPT:\n{script.strip()}"
+        "IMPORTANT: The script has already been split into equally-sized scenes. "
+        "Do NOT change scene_number, start_time, end_time, duration, or script_segment. "
+        "Return them verbatim. Your job is to add the documentary classification and "
+        "Tatterveil image prompt for each scene.\n\n"
+        f"LOCKED SCENES (use exactly these segments and timings):\n"
+        f"{json.dumps(locked_payload, ensure_ascii=False)}\n\n"
+        f"FULL SCRIPT (context only — for tone / continuity):\n{script.strip()}"
     )
 
     client = _get_client()
@@ -159,9 +275,37 @@ def split_and_prompt(
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content or ""
-            scenes = _robust_parse(raw)
-            logger.info(f"LLM returned {len(scenes)} scenes (expected {scene_count})")
-            return scenes
+            llm_scenes = _robust_parse(raw)
+            logger.info(
+                "LLM returned %s enriched scenes (locked %s)",
+                len(llm_scenes), len(pre_segments),
+            )
+
+            # Merge: keep pre-computed timing + script_segment, take enrichment from LLM.
+            by_num: dict[int, dict] = {}
+            for row in llm_scenes:
+                try:
+                    n = int(row.get("scene_number") or 0)
+                except (TypeError, ValueError):
+                    n = 0
+                if n > 0:
+                    by_num[n] = row
+
+            merged: list[dict] = []
+            for pre in pre_segments:
+                n = int(pre["scene_number"])
+                enrich = by_num.get(n, {})
+                row = dict(enrich)
+                # Locked fields always come from the deterministic split.
+                row["scene_number"] = pre["scene_number"]
+                row["slot_number"]  = pre["slot_number"]
+                row["start_time"]   = pre["start_time"]
+                row["end_time"]     = pre["end_time"]
+                row["duration"]     = pre["duration"]
+                row["script_segment"] = pre["script_segment"]
+                row["word_count"]   = pre["word_count"]
+                merged.append(row)
+            return merged
 
         except Exception as exc:
             logger.warning(f"LLM attempt {attempt + 1}/{config.MAX_RETRIES} failed: {exc}")

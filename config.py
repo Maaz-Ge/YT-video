@@ -13,6 +13,25 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 TEXT_MODEL:  str = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")   # scene splitting + prompt generation
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL",       "gpt-image-2")    # image generation
 
+# ── ElevenLabs (voice-over per scene) ────────────────────────────────────────
+ELEVEN_API_KEY: str = os.getenv("ELEVEN_API_KEY", "")
+ELEVEN_VOICE_ID: str = os.getenv("ELEVEN_VOICE_ID", "VuLPiW02W0Qm8465ksBZ")
+ELEVEN_MODEL_ID: str = os.getenv("ELEVEN_MODEL_ID", "eleven_multilingual_v2")
+# Must be a format accepted by your ElevenLabs account tier/API.
+# Example valid values: wav_44100, wav_48000, mp3_44100_128, pcm_44100.
+ELEVEN_OUTPUT_FORMAT: str = os.getenv("ELEVEN_OUTPUT_FORMAT", "wav_44100")
+# Voice settings calibrated for the documentary delivery (matches test11labs.py).
+ELEVEN_VOICE_SETTINGS: dict = {
+    "stability":        float(os.getenv("ELEVEN_STABILITY",        "0.26")),
+    "similarity_boost": float(os.getenv("ELEVEN_SIMILARITY_BOOST", "0.33")),
+    "style":            float(os.getenv("ELEVEN_STYLE",            "0.07")),
+    "use_speaker_boost": True,
+    "speed":            float(os.getenv("ELEVEN_SPEED",            "0.7")),
+}
+# Parallel workers for VO generation — ElevenLabs allows concurrent requests on
+# paid plans; tune via env if you hit rate limits.
+VOICE_WORKERS: int = int(os.getenv("VOICE_WORKERS", "3"))
+
 # ── gpt-image-2 resolution presets (all 16:9) ────────────────────────────────
 # User picks resolution AND quality independently on the creation form.
 RESOLUTION_PRESETS: dict = {
@@ -27,7 +46,9 @@ QUALITY_OPTIONS: tuple = ("low", "medium", "high")
 DEFAULT_QUALITY: str = "medium"
 
 # ── Narration pacing ──────────────────────────────────────────────────────────
-WORDS_PER_MINUTE: int = 150     # typical YouTube narration pace
+# 120 wpm matches ElevenLabs speed=0.7 — 150 words then ≈ 1:12 of audio, so we
+# divide the script by 120 to keep the on-screen scene length ≈ the spoken length.
+WORDS_PER_MINUTE: int = 120
 MIN_DURATION: float   = 1.0     # minimum video duration in minutes
 FIRST_SEGMENT: int    = 5       # minutes before the scene-rate switches
 

@@ -1,8 +1,9 @@
 # Tatterveil Scene Studio
 
 A purpose-built SaaS platform that converts Tatterveil YouTube scripts into
-atmospheric, photorealistic scene images. Paste a script → receive a full
-set of timestamped, AI-generated visuals that faithfully follow the Tatterveil
+atmospheric, photorealistic scene images **and per-scene voice-overs**. Paste a
+script → receive a full set of timestamped, AI-generated visuals **plus a
+spoken narration clip per scene** that faithfully follows the Tatterveil
 Visual Style Guide.
 
 ---
@@ -35,7 +36,13 @@ Requires an `.env` file in this folder (or in `../image_generator/`):
 
 ```
 OPENAI_API_KEY=sk-...
+ELEVEN_API_KEY=<your-elevenlabs-key>    # optional — leave blank to skip voice-overs
 ```
+
+When `ELEVEN_API_KEY` is set, every scene gets a `.mp3` voice-over rendered with
+ElevenLabs (`eleven_multilingual_v2`, speed 0.7, voice
+`VuLPiW02W0Qm8465ksBZ`). Voice clips are converted to WAV and bundled in the
+final ZIP export alongside the per-scene MP4s.
 
 ---
 
@@ -51,10 +58,11 @@ YT-video/
 ├── projects/            Generated project data (gitignored)
 │
 ├── engine/
-│   ├── scene_utils.py   Stable `entry_id`s, PNG filenames, duplicate-slot detection
+│   ├── scene_utils.py   Stable `entry_id`s, PNG/MP3 filenames, duplicate-slot detection
 │   ├── style_guide.py   Full Tatterveil style guide encoded as Python constants
 │   │                    + the LLM system prompt used for scene splitting
-│   └── pipeline.py      Core generation engine (3 steps + refine/regenerate prompts)
+│   ├── pipeline.py      Core generation engine (deterministic equal-word split + prompts + images)
+│   └── voice.py         ElevenLabs voice-over generation (one MP3 per timeline slot)
 │
 ├── templates/
 │   ├── layout.html      Base template (nav, toast notifications)
@@ -74,6 +82,7 @@ YT-video/
 |---|---|
 | Script analysis + prompt generation | `gpt-5.4-mini` |
 | Image generation | `gpt-image-2` |
+| Per-scene voice-over (TTS) | ElevenLabs `eleven_multilingual_v2` (speed 0.7) |
 
 Both models are configurable via environment variables:
 

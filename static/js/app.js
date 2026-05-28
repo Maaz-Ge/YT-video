@@ -408,7 +408,7 @@ let _lastProgress = -1;
 let _regenTargetEntryId = null;
 
 const TERMINAL_STEPS = ["done", "error"];
-const STEP_ORDER = ["queued", "analysing", "prompting", "prompting_done", "generating", "done"];
+const STEP_ORDER = ["queued", "analysing", "prompting", "prompting_done", "generating", "voicing", "done"];
 
 function initProjectPage() {
   if (typeof window.PROJECT_ID === "undefined") return;
@@ -578,6 +578,10 @@ function applyStatus(data) {
     counter.style.display = "flex";
     if (counterDone) counterDone.textContent = data.scenes_done || 0;
     if (counterTotal) counterTotal.textContent = data.total_scenes || 0;
+  } else if (counter && step === "voicing") {
+    counter.style.display = "flex";
+    if (counterDone) counterDone.textContent = data.voice_done || 0;
+    if (counterTotal) counterTotal.textContent = data.voice_total || 0;
   }
 
   const progressSection = document.getElementById("progress-section");
@@ -629,6 +633,7 @@ function updateStepTrack(currentStep) {
     prompting: "step-prompting",
     prompting_done: "step-prompting",
     generating: "step-generating",
+    voicing: "step-generating",
     done: "step-done",
     error: null,
   };
@@ -686,6 +691,121 @@ function syncSceneGrid(scenes) {
   });
 }
 
+function voiceFilenameFromPath(p) {
+  if (!p) return null;
+  const parts = String(p).split(/[/\\]/);
+  return parts[parts.length - 1] || null;
+}
+
+function buildVoiceBlockHTML(scene) {
+  const status = scene.voice_status || "pending";
+  const slot = scene.slot_number || scene.scene_number || 0;
+  const filename = status === "done" ? voiceFilenameFromPath(scene.voice_path) : null;
+  let tag = `<span class="scene-voice-tag">queued</span>`;
+  if (status === "done") tag = `<span class="scene-voice-tag scene-voice-tag--ok">ready</span>`;
+  else if (status === "error") tag = `<span class="scene-voice-tag scene-voice-tag--err">failed</span>`;
+  else if (status === "skipped") tag = `<span class="scene-voice-tag scene-voice-tag--skip">skipped</span>`;
+
+  let body;
+  if (status === "done" && filename) {
+    body = `<audio class="scene-voice-audio" controls preload="none" src="/projects/${window.PROJECT_ID}/voiceovers/${encodeURIComponent(filename)}"></audio>`;
+  } else if (status === "error") {
+    body = `<p class="scene-voice-error">${escapeHTML(scene.voice_error || "Voice generation failed.")}</p>`;
+  } else if (status === "skipped") {
+    body = `<p class="scene-voice-hint">Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.</p>`;
+  } else {
+    body = `<p class="scene-voice-hint">Voice-over will render after images finish…</p>`;
+  }
+
+  return `
+    <div class="scene-voice" data-slot="${slot}">
+      <p class="scene-section-label scene-voice-label">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M3 4v3M5.5 2.5v6M8 4v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        Voice-over ${tag}
+      </p>
+      ${body}
+    </div>`;
+}
+
+function updateSceneVoice(card, scene) {
+  const block = card.querySelector(".scene-voice");
+  if (!block) return;
+  const status = scene.voice_status || "pending";
+  const filename = status === "done" ? voiceFilenameFromPath(scene.voice_path) : null;
+
+  // Refresh status tag.
+  const label = block.querySelector(".scene-voice-label");
+  if (label) {
+    let tagHTML = `<span class="scene-voice-tag">queued</span>`;
+    if (status === "done") tagHTML = `<span class="scene-voice-tag scene-voice-tag--ok">ready</span>`;
+    else if (status === "error") tagHTML = `<span class="scene-voice-tag scene-voice-tag--err">failed</span>`;
+    else if (status === "skipped") tagHTML = `<span class="scene-voice-tag scene-voice-tag--skip">skipped</span>`;
+    const existing = label.querySelector(".scene-voice-tag");
+    if (existing) existing.outerHTML = tagHTML;
+    else label.insertAdjacentHTML("beforeend", " " + tagHTML);
+  }
+
+  // Replace body if status changed.
+  const existingAudio = block.querySelector("audio.scene-voice-audio");
+  const existingErr = block.querySelector(".scene-voice-error");
+  const existingHint = block.querySelector(".scene-voice-hint");
+
+  if (status === "done" && filename) {
+    const src = `/projects/${window.PROJECT_ID}/voiceovers/${encodeURIComponent(filename)}`;
+    if (existingAudio) {
+      if (existingAudio.getAttribute("src") !== src) existingAudio.setAttribute("src", src);
+    } else {
+      if (existingErr) existingErr.remove();
+      if (existingHint) existingHint.remove();
+      const audio = document.createElement("audio");
+      audio.className = "scene-voice-audio";
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = src;
+      block.appendChild(audio);
+    }
+  } else {
+    if (existingAudio) existingAudio.remove();
+    if (status === "error") {
+      const msg = scene.voice_error || "Voice generation failed.";
+      if (existingErr) existingErr.textContent = msg;
+      else if (!block.querySelector(".scene-voice-error")) {
+        const p = document.createElement("p");
+        p.className = "scene-voice-error";
+        p.textContent = msg;
+        if (existingHint) existingHint.remove();
+        block.appendChild(p);
+      }
+    } else {
+      if (existingErr) existingErr.remove();
+      const hintText =
+        status === "skipped"
+          ? null
+          : "Voice-over will render after images finish…";
+      if (status === "skipped") {
+        if (existingHint) {
+          existingHint.innerHTML = "Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.";
+        } else {
+          const p = document.createElement("p");
+          p.className = "scene-voice-hint";
+          p.innerHTML = "Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.";
+          block.appendChild(p);
+        }
+      } else {
+        if (existingHint) existingHint.textContent = hintText;
+        else {
+          const p = document.createElement("p");
+          p.className = "scene-voice-hint";
+          p.textContent = hintText;
+          block.appendChild(p);
+        }
+      }
+    }
+  }
+}
+
 function updateSceneCardMedia(card, scene) {
   const hasImage = scene.image_path && scene.image_status === "done";
   const wrap = card.querySelector(".scene-img-wrap");
@@ -736,6 +856,8 @@ function updateSceneCardMedia(card, scene) {
   }
   const regBtn = card.querySelector(".btn-regenerate-variant");
   if (regBtn) regBtn.disabled = scene.image_status !== "done";
+
+  updateSceneVoice(card, scene);
 
   let dupBar = card.querySelector(".scene-dup-banner");
   if (scene.slot_has_duplicates) {
@@ -855,6 +977,7 @@ function buildSceneCard(scene, idx) {
         </p>
         ${scriptSegHtml}
       </div>
+      ${buildVoiceBlockHTML(scene)}
       <div class="scene-card-actions">
         <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}" ${scene.image_status === "done" ? "" : "disabled"}>Regenerate</button>
         <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}">Delete variant</button>
