@@ -781,6 +781,15 @@ function updateProjectVoiceover(voiceover) {
   }
 }
 
+function scenePreviewUrl(filename, cacheBust) {
+  const bust = cacheBust ? `?t=${cacheBust}` : "";
+  return `/projects/${window.PROJECT_ID}/previews/${filename}${bust}`;
+}
+
+function sceneFullImageUrl(filename) {
+  return `/projects/${window.PROJECT_ID}/images/${filename}`;
+}
+
 function updateSceneCardMedia(card, scene) {
   const hasImage = scene.image_path && scene.image_status === "done";
   const wrap = card.querySelector(".scene-img-wrap");
@@ -795,10 +804,12 @@ function updateSceneCardMedia(card, scene) {
       img.className = "scene-img";
       img.alt = `Scene ${scene.slot_number || scene.scene_number}`;
       img.loading = "lazy";
+      img.decoding = "async";
       if (ph) ph.replaceWith(img);
       else wrap.insertBefore(img, wrap.firstChild);
     }
-    img.src = `/projects/${window.PROJECT_ID}/images/${filename}?t=${stamp}`;
+    img.src = scenePreviewUrl(filename, stamp);
+    img.dataset.fullSrc = sceneFullImageUrl(filename);
     wrap.classList.add("scene-img-wrap--clickable");
     if (!wrap.hasAttribute("data-action")) {
       wrap.setAttribute("data-action", "open-lightbox");
@@ -882,7 +893,7 @@ function buildSceneCard(scene, idx) {
     : "";
 
   const imgBlock = hasImage
-    ? `<img src="/projects/${window.PROJECT_ID}/images/${filename}" alt="Scene ${num}" class="scene-img" loading="lazy" />${zoomBtn}`
+    ? `<img src="${scenePreviewUrl(filename)}" data-full-src="${sceneFullImageUrl(filename)}" alt="Scene ${num}" class="scene-img" loading="lazy" decoding="async" />${zoomBtn}`
     : `<div class="scene-img-placeholder"><div class="placeholder-spinner"></div></div>`;
 
   const wrapAttrs = hasImage
@@ -1169,8 +1180,9 @@ function openLightboxForCard(card) {
   const cap = document.getElementById("lightbox-caption");
   if (!lb || !img) return;
   const src = card.querySelector("img.scene-img");
-  if (!src || !src.src) return;
-  img.src = src.src;
+  if (!src) return;
+  const fullSrc = src.getAttribute("data-full-src") || src.dataset.fullSrc || src.src;
+  img.src = fullSrc;
   img.alt = src.alt || "";
   if (cap) {
     const slot = card.querySelector(".scene-badge-num");

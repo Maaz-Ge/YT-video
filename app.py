@@ -27,6 +27,7 @@ from flask import (
 
 import config
 from engine import pipeline, voice as voice_engine
+from engine import thumbnails
 from engine.scene_utils import (
     duplicate_slot_numbers,
     ensure_scene_entries,
@@ -1326,7 +1327,27 @@ def serve_image(project_id: str, filename: str):
     if not img_path.exists():
         abort(404)
     mime = "image/png" if filename.lower().endswith(".png") else "image/jpeg"
-    return send_file(img_path, mimetype=mime)
+    resp = send_file(img_path, mimetype=mime, conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
+@app.route("/projects/<project_id>/previews/<filename>")
+def serve_preview(project_id: str, filename: str):
+    """Grid-sized JPEG preview (~100–400 KB) instead of full 4K PNG through Flask."""
+    img_path = config.PROJECTS_DIR / project_id / "images" / filename
+    if not img_path.exists():
+        abort(404)
+    try:
+        thumb = thumbnails.ensure_thumbnail(img_path)
+    except Exception as exc:
+        logger.exception("Preview generation failed for %s", filename)
+        abort(500, description=str(exc))
+    if thumb is None or not thumb.exists():
+        abort(404)
+    resp = send_file(thumb, mimetype="image/jpeg", conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
 
 
 @app.route("/projects/<project_id>/voiceovers/<filename>")

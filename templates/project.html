@@ -379,10 +379,12 @@
                {% if s.image_path and s.image_status == 'done' %}role="button" tabindex="0" data-action="open-lightbox"{% endif %}>
             {% if s.image_path and s.image_status == 'done' %}
               <img
-                src="/projects/{{ project.id }}/images/{{ img_file }}"
+                src="/projects/{{ project.id }}/previews/{{ img_file }}"
+                data-full-src="/projects/{{ project.id }}/images/{{ img_file }}"
                 alt="Scene {{ slot }}"
                 class="scene-img"
                 loading="lazy"
+                decoding="async"
               />
               <button type="button" class="scene-zoom-btn" data-action="open-lightbox" aria-label="View image full screen">
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none">

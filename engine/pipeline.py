@@ -389,6 +389,13 @@ def generate_image(
             image_bytes = base64.b64decode(image_b64)
             out_path.write_bytes(image_bytes)
 
+            try:
+                from engine.thumbnails import ensure_thumbnail
+
+                ensure_thumbnail(out_path)
+            except Exception as exc:
+                logger.warning("Preview thumbnail failed for %s: %s", out_path.name, exc)
+
             elapsed       = time.monotonic() - started_at
             attempt_time  = time.monotonic() - attempt_start
             logger.info(

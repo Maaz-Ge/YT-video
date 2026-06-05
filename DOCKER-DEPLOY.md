@@ -221,6 +221,22 @@ server {
 
 Then use Certbot for HTTPS. Point `proxy_pass` at `127.0.0.1:5001` because Docker publishes that port on localhost.
 
+**Faster image loading (recommended for 4K projects):** serve previews and full PNGs directly from disk instead of through Gunicorn:
+
+```nginx
+    # Host path must match docker-compose volume: ./projects:/app/projects
+    location ~ ^/projects/([^/]+)/previews/(.+)\.(png|jpe?g)$ {
+        alias /var/www/project/YT-video/projects/$1/images/thumbs/$2.jpg;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+    location ~ ^/projects/([^/]+)/images/(.+)$ {
+        alias /var/www/project/YT-video/projects/$1/images/$2;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+```
+
+Place these **above** the `location / { proxy_pass ... }` block. The app still generates thumbnails; nginx just delivers them faster.
+
 ---
 
 ## Troubleshooting
