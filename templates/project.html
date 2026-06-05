@@ -51,7 +51,7 @@
           {% elif state.get('step') not in ('done', 'error') %}
           Export unlocks when generation finishes (one MP4 per scene slot, length = scene duration).
           {% else %}
-          Includes scene_001.mp4 … in slot order, scene_timestamps.txt, and project_export_metadata.json.
+          Includes scene MP4s, full narration audio, scene_timestamps.txt, and project_export_metadata.json.
           {% endif %}
         </span>
       </div>
@@ -86,6 +86,10 @@
           </div>
           {% endif %}
           <div class="proj-setting">
+            <span class="proj-setting-label">Narration speed</span>
+            <span class="proj-setting-value">{{ project.voice_speed if project.voice_speed is not none else '1.0' }} <span class="proj-setting-note">(locked)</span></span>
+          </div>
+          <div class="proj-setting">
             <span class="proj-setting-label">Scenes/min — first 5 min</span>
             <span class="proj-setting-value">{{ project.first_rate }}</span>
           </div>
@@ -99,8 +103,8 @@
             <span class="proj-setting-value">{{ project.scene_plan.total_scenes }}</span>
           </div>
           <div class="proj-setting">
-            <span class="proj-setting-label">Est. video duration</span>
-            <span class="proj-setting-value">{{ "%.1f"|format(project.scene_plan.duration_minutes) }} min</span>
+            <span class="proj-setting-label">Video duration</span>
+            <span class="proj-setting-value">{{ "%.1f"|format(project.scene_plan.duration_minutes) }} min <span class="proj-setting-note">from narration</span></span>
           </div>
           {% endif %}
           {% if project.created_at %}
@@ -173,6 +177,11 @@
       <div class="step-item" id="step-analysing" data-steps="queued,analysing">
         <div class="step-dot"></div>
         <span class="step-label">Analysing Script</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" id="step-voicing" data-steps="voicing">
+        <div class="step-dot"></div>
+        <span class="step-label">Voice-over</span>
       </div>
       <div class="step-connector"></div>
       <div class="step-item" id="step-prompting" data-steps="prompting,prompting_done">
@@ -299,6 +308,44 @@
 </section>
 {% endif %}
 
+<!-- ── Combined voice-over (whole script) ───────────────────────────────────── -->
+<section
+  class="voiceover-section"
+  id="voiceover-section"
+  {% if not (voiceover and voiceover.status == 'done') %}style="display:none"{% endif %}
+>
+  <div class="container">
+    <div class="voiceover-card">
+      <div class="voiceover-head">
+        <div class="voiceover-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M5 6.5v5M9 3v12M13 6.5v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="voiceover-meta">
+          <p class="section-label" style="margin-bottom:2px">Voice-over</p>
+          <h3 class="voiceover-title">Full narration</h3>
+          <p class="voiceover-sub" id="voiceover-sub">
+            {% if voiceover and voiceover.status == 'done' %}
+              {{ "%d:%02d"|format((voiceover.duration_seconds|int)//60, (voiceover.duration_seconds|int)%60) }}
+              · {{ voiceover.chunks }} chunk{{ '' if voiceover.chunks == 1 else 's' }} · one combined audio for the whole video
+            {% endif %}
+          </p>
+        </div>
+      </div>
+      <audio
+        id="voiceover-audio"
+        class="voiceover-audio"
+        controls
+        preload="none"
+        {% if voiceover and voiceover.status == 'done' and voiceover.url %}
+          src="/projects/{{ project.id }}/{{ voiceover.url }}"
+        {% endif %}
+      ></audio>
+    </div>
+  </div>
+</section>
+
 <!-- ── Scene grid ─────────────────────────────────────────────────────────── -->
 <section class="scenes-section" id="scenes-section">
   <div class="container">
@@ -411,39 +458,6 @@
               {% endif %}
             </div>
 
-            <div class="scene-voice" data-slot="{{ slot }}">
-              <p class="scene-section-label scene-voice-label">
-                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-                  <path d="M3 4v3M5.5 2.5v6M8 4v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-                </svg>
-                Voice-over
-                {% if s.voice_status == 'done' %}
-                  <span class="scene-voice-tag scene-voice-tag--ok">ready</span>
-                {% elif s.voice_status == 'error' %}
-                  <span class="scene-voice-tag scene-voice-tag--err">failed</span>
-                {% elif s.voice_status == 'skipped' %}
-                  <span class="scene-voice-tag scene-voice-tag--skip">skipped</span>
-                {% else %}
-                  <span class="scene-voice-tag">queued</span>
-                {% endif %}
-              </p>
-              {% if s.voice_status == 'done' and s.voice_path %}
-                {% set v_file = s.voice_path.replace('\\', '/').split('/')[-1] %}
-                <audio
-                  class="scene-voice-audio"
-                  controls
-                  preload="none"
-                  src="/projects/{{ project.id }}/voiceovers/{{ v_file }}"
-                ></audio>
-              {% elif s.voice_status == 'error' %}
-                <p class="scene-voice-error">{{ s.voice_error or 'Voice generation failed.' }}</p>
-              {% elif s.voice_status == 'skipped' %}
-                <p class="scene-voice-hint">Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.</p>
-              {% else %}
-                <p class="scene-voice-hint">Voice-over will render after images finish…</p>
-              {% endif %}
-            </div>
-
             <div class="scene-card-actions">
               <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="{{ s.entry_id }}" {% if s.image_status != 'done' %}disabled{% endif %}>Regenerate</button>
               <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}">Delete variant</button>
@@ -452,7 +466,7 @@
             <details class="scene-prompt-details">
               <summary class="scene-prompt-toggle">
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                Prompt sent to gpt-image-2
+                View image prompt
               </summary>
               <div class="scene-prompt-body">
                 <p class="scene-prompt-label-inner">Positive prompt:</p>
@@ -535,5 +549,6 @@
   window.SCENE_TYPE_COLORS = {{ scene_type_colors | tojson }};
   window.PERIOD_LABELS     = {{ period_labels | tojson }};
   window.REGEN_PARALLELISM = {{ regen_parallelism }};
+  window.VOICEOVER         = {{ (voiceover or none) | tojson }};
 </script>
 {% endblock %}

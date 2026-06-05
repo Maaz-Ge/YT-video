@@ -46,31 +46,31 @@
         </div>
         <span class="feature-step">01</span>
         <h3 class="feature-title">Paste your script</h3>
-        <p class="feature-desc">The system counts your words and instantly estimates how long your video will be — 150 words equals roughly 1 minute of narration.</p>
+        <p class="feature-desc">Write the words you will speak. We generate one full narration track first, then use its length to time every scene.</p>
       </div>
       <div class="feature-card animate-fade-up" style="--delay:0.1s">
         <div class="feature-icon">
           <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v4M11 15v4M3 11h4m6 0h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="11" cy="11" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
         </div>
         <span class="feature-step">02</span>
-        <h3 class="feature-title">Set your scene pace</h3>
-        <p class="feature-desc">Choose how many images per minute for the opening 5 minutes, then a separate rate for the rest — faster pace early, slower later.</p>
+        <h3 class="feature-title">Choose narration speed</h3>
+        <p class="feature-desc">Pick how fast the voice reads your script (0.25 = slower, 1.0 = normal). This is locked when you create the project — you cannot change or regenerate the voice later.</p>
       </div>
       <div class="feature-card animate-fade-up" style="--delay:0.15s">
         <div class="feature-icon">
           <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 11h14M4 7h10M4 15h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </div>
         <span class="feature-step">03</span>
-        <h3 class="feature-title">5-step prompt generation</h3>
-        <p class="feature-desc">GPT-5.4-mini detects time periods, classifies scene types, triggers abstraction mode for mysteries, and writes a full Tatterveil-style prompt per scene.</p>
+        <h3 class="feature-title">Set your scene pace</h3>
+        <p class="feature-desc">Choose how many images per minute for the opening 5 minutes, then a separate rate for the rest — faster pace early, slower later.</p>
       </div>
       <div class="feature-card animate-fade-up" style="--delay:0.2s">
         <div class="feature-icon">
           <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="4" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="12" y="4" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="13" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="12" y="13" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>
         </div>
         <span class="feature-step">04</span>
-        <h3 class="feature-title">2048×1152 images</h3>
-        <p class="feature-desc">gpt-image-2 renders every scene at full 16:9 resolution in your chosen quality — all consistent in style, palette, and atmosphere.</p>
+        <h3 class="feature-title">Cinematic scene images</h3>
+        <p class="feature-desc">Each scene gets a matching Tatterveil-style image at your chosen resolution and quality — consistent palette, atmosphere, and 16:9 framing.</p>
       </div>
     </div>
   </div>
@@ -130,7 +130,7 @@
               Narration Script
             </label>
             <button type="button" class="info-btn"
-              data-tip="Write your full spoken narration — the words you will actually say in the video.&#10;&#10;Rules for best results:&#10;• Write only spoken words, no stage directions&#10;• Mention specific objects, locations, and time periods — the AI uses these for visuals&#10;• Typical YouTube narration is about 150 words per minute&#10;• 300 words ≈ 2 min video · 750 words ≈ 5 min · 1500 words ≈ 10 min&#10;&#10;There is no minimum or maximum — the system adapts to any length.">
+              data-tip="Write your full spoken narration — the words you will actually say in the video.&#10;&#10;Rules for best results:&#10;• Write only spoken words, no stage directions&#10;• Mention specific objects, locations, and time periods — these guide the visuals&#10;• Longer scripts produce longer videos once narration is generated&#10;&#10;There is no minimum or maximum — the system adapts to any length.">
               ⓘ How to write your script
             </button>
           </div>
@@ -230,7 +230,7 @@
             <div class="form-label-row">
               <label class="form-label">Quality</label>
               <button type="button" class="info-btn"
-                data-tip="Controls how much processing gpt-image-2 uses on each image.&#10;&#10;Low — fastest, lowest cost, good for drafts&#10;Medium — balanced (recommended for production)&#10;High — maximum detail and atmosphere, highest cost&#10;&#10;Quality is independent of resolution. You can pick e.g. 4K + Low for previews.">
+                data-tip="How much detail each image gets.&#10;&#10;Low — fastest, lowest cost, good for drafts&#10;Medium — balanced (recommended for production)&#10;High — maximum detail and atmosphere, highest cost&#10;&#10;Quality is independent of resolution. You can pick e.g. 4K + Low for previews.">
                 ⓘ
               </button>
             </div>
@@ -257,6 +257,32 @@
                 </span>
               </label>
             </div>
+          </div>
+        </div>
+
+        <!-- Narration speed (locked at project creation) -->
+        <div class="timing-section voice-speed-section">
+          <div class="form-label-row">
+            <p class="form-label">Narration speed</p>
+            <button type="button" class="info-btn"
+              data-tip="How fast the voice reads your script.&#10;&#10;1.0 = normal pace&#10;0.75 = slightly slower&#10;0.5 = half speed (longer video)&#10;0.25 = slowest allowed&#10;&#10;This value is saved with the project and cannot be changed later. The voice-over is generated once at creation.">
+              ⓘ About narration speed
+            </button>
+          </div>
+          <div class="timing-field timing-field--full">
+            <label class="timing-label" for="voice_speed">
+              Speaking pace
+              <span class="timing-unit">0.25 slow · 1.0 normal</span>
+            </label>
+            <div class="slider-row">
+              <input type="range" id="voice_speed_slider" min="0.25" max="1" step="0.05" value="1" class="range-slider" />
+              <input type="number" id="voice_speed" name="voice_speed" min="0.25" max="1" step="0.05" value="1" class="range-number range-number--wide" />
+            </div>
+            <p class="timing-hint" id="voice-speed-hint">Normal pace — matches typical documentary narration</p>
+          </div>
+          <div class="speed-caution" role="note">
+            <strong>Important:</strong> Narration speed is locked when you start generation.
+            You will <em>not</em> be able to regenerate or change the voice for this project later.
           </div>
         </div>
 
@@ -361,10 +387,11 @@
         </div>
 
         <div class="estimate-explainer">
-          <p class="explainer-title">How duration is calculated</p>
+          <p class="explainer-title">How timing works</p>
           <p class="explainer-body">
-            YouTube narration averages <strong>150 words per minute</strong>. The system
-            counts the words in your script and divides by 150 to estimate the video length.
+            Before generation, we show a <strong>rough preview</strong> based on your script
+            length and narration speed. The real video length comes from the generated
+            narration audio — scene timestamps always match that recording.
           </p>
           <p class="explainer-body" style="margin-top:0.5rem">
             Scene count is split into two segments: the <strong>opening 5 minutes</strong>
@@ -396,9 +423,13 @@
 <div id="cost-confirm-modal" class="modal-overlay" hidden>
   <div class="modal-card modal-card--wide">
     <h3>Confirm generation cost</h3>
-    <p class="modal-hint">Review your settings and the estimated spend before we kick off the OpenAI calls.</p>
+    <p class="modal-hint">Review your settings and estimated cost before generation starts. Narration speed cannot be changed after this.</p>
 
     <div class="cost-confirm-grid">
+      <div class="cost-confirm-row">
+        <span class="cost-confirm-label">Narration speed</span>
+        <span class="cost-confirm-value" id="cc-voice-speed">—</span>
+      </div>
       <div class="cost-confirm-row">
         <span class="cost-confirm-label">Resolution</span>
         <span class="cost-confirm-value" id="cc-resolution">—</span>
@@ -430,7 +461,7 @@
     </div>
 
     <p class="cost-confirm-note">
-      Cost is an estimate based on the OpenAI image price table you provided. Final cost is calculated
+      Cost is an estimate from your resolution, quality, and scene count. Final cost is calculated
       after generation completes and counted only against images that succeeded.
     </p>
 

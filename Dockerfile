@@ -32,7 +32,8 @@ EXPOSE 5001
 CMD ["gunicorn", \
      "--bind", "0.0.0.0:5001", \
      "--workers", "1", \
-     "--threads", "8", \
+     "--worker-class", "gthread", \
+     "--threads", "12", \
      "--timeout", "600", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \

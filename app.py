@@ -12,7 +12,8 @@ import threading
 import time
 import uuid
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from flask import (
@@ -65,6 +66,15 @@ def _state_path(project_id: str) -> Path:
 
 def _scenes_path(project_id: str) -> Path:
     return config.PROJECTS_DIR / project_id / "scenes.json"
+
+
+def _parse_voice_speed(raw) -> float:
+    """Clamp ElevenLabs narration speed to 0.25–1.0 (locked when the project is created)."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = float(config.DEFAULT_VOICE_SPEED)
+    return round(max(0.25, min(1.0, v)), 2)
 
 
 def _meta_path(project_id: str) -> Path:
@@ -129,22 +139,9 @@ def _scenes_live(project_id: str) -> list[dict]:
         return []
     rows = [dict(s) for s in raw]
     needs_save = any(not r.get("entry_id") for r in rows)
-    legacy_voice = any("voice_status" not in r for r in rows)
     fixed = ensure_scene_entries(rows)
 
-    # If this project finished before voice-over support existed, mark every
-    # row as skipped so the UI doesn't show a permanent "queued" badge.
-    state = _get_state(project_id) or {}
-    step = state.get("step")
-    if legacy_voice and step in ("done", "error"):
-        project_dir = config.PROJECTS_DIR / project_id
-        for r in fixed:
-            vp = project_dir / str(r.get("voice_path") or "").replace("\\", "/")
-            if r.get("voice_status") == "pending" and not vp.exists():
-                r["voice_status"] = "skipped"
-                r["voice_error"] = "Generated before voice-over support."
-
-    if needs_save or legacy_voice:
+    if needs_save:
         try:
             _save_scenes(project_id, fixed)
         except Exception:
@@ -306,16 +303,73 @@ def _run_generation(project_id: str, meta: dict) -> None:
         # ── Step 1: Analyse script ───────────────────────────────────────────
         step_start = time.monotonic()
         _set_state(project_id, step="analysing", progress=3,
-                   message="Analysing script length and estimating duration…")
+                   message="Analysing script…")
 
         script = meta["script"]
-        duration = pipeline.estimate_duration(script)
+        timing_log["analyse_seconds"] = round(time.monotonic() - step_start, 2)
+
+        # ── Step 2: Generate the full voice-over FIRST ───────────────────────
+        # The measured audio length is the real video duration that drives the
+        # scene split (so scenes line up with the spoken narration).
+        voice_start = time.monotonic()
+        voiceover_info: dict
+        if config.ELEVEN_API_KEY:
+            chunks = voice_engine.chunk_script(script, config.VOICE_MAX_CHARS)
+            total_chunks = max(1, len(chunks))
+            _set_state(
+                project_id, step="voicing", progress=8,
+                message=f"Generating voice-over for the full script "
+                        f"({total_chunks} chunk{'s' if total_chunks != 1 else ''})…",
+                voice_total=total_chunks, voice_done=0,
+            )
+
+            def on_voice_progress(done: int, total: int) -> None:
+                pct = 8 + int(done / max(1, total) * 27)  # 8 → 35
+                _set_state(
+                    project_id, step="voicing", progress=min(35, pct),
+                    message=f"Generated voice chunk {done} of {total}…",
+                    voice_total=total, voice_done=done,
+                )
+
+            try:
+                voiceover_info = voice_engine.generate_full_voiceover(
+                    script=script,
+                    project_dir=project_dir,
+                    speed=_parse_voice_speed(meta.get("voice_speed")),
+                    on_progress=on_voice_progress,
+                )
+                duration = max(
+                    voiceover_info["duration_seconds"] / 60.0, config.MIN_DURATION
+                )
+                logger.info(
+                    "Voice-over duration %.1fs → %.2f min (drives scene plan).",
+                    voiceover_info["duration_seconds"], duration,
+                )
+            except Exception as exc:
+                logger.error("Voice-over generation failed: %s", exc, exc_info=True)
+                voiceover_info = {"status": "error", "error": str(exc)}
+                duration = pipeline.estimate_duration(
+                    script, _parse_voice_speed(meta.get("voice_speed"))
+                )
+        else:
+            logger.info("ELEVEN_API_KEY not set — skipping voice-over generation.")
+            voiceover_info = {
+                "status": "skipped",
+                "error": "ELEVEN_API_KEY not configured",
+            }
+            duration = pipeline.estimate_duration(
+                script, _parse_voice_speed(meta.get("voice_speed"))
+            )
+
+        meta["voiceover"] = voiceover_info
+        timing_log["voice_seconds"] = round(time.monotonic() - voice_start, 2)
+
+        # ── Step 3: Compute scene plan from the actual duration ──────────────
         scene_plan = pipeline.compute_scene_plan(
             duration=duration,
             first_rate=meta["first_rate"],
             rest_rate=meta["rest_rate"],
         )
-        # Update meta with computed plan + locked-in cost estimate.
         meta["scene_plan"] = scene_plan
         meta["cost_estimate"] = _estimate_cost(
             meta.get("resolution"),
@@ -323,15 +377,14 @@ def _run_generation(project_id: str, meta: dict) -> None:
             scene_plan.get("total_scenes", 0),
         )
         _meta_path(project_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-        timing_log["analyse_seconds"] = round(time.monotonic() - step_start, 2)
-        _set_state(project_id, step="analysing", progress=8,
-                   message=f"Script is ~{duration:.1f} min → {scene_plan['total_scenes']} scenes planned",
+        _set_state(project_id, step="voicing", progress=36,
+                   message=f"Voice-over is ~{duration:.1f} min → "
+                           f"{scene_plan['total_scenes']} scenes planned",
                    scene_plan=scene_plan)
 
-        # ── Step 2: Split script + generate prompts ──────────────────────────
+        # ── Step 4: Split script + generate prompts ──────────────────────────
         step_start = time.monotonic()
-        _set_state(project_id, step="prompting", progress=12,
+        _set_state(project_id, step="prompting", progress=38,
                    message="Splitting script into scenes and generating visual prompts…")
 
         scenes = pipeline.split_and_prompt(
@@ -343,18 +396,18 @@ def _run_generation(project_id: str, meta: dict) -> None:
 
         timing_log["prompt_seconds"] = round(time.monotonic() - step_start, 2)
         _save_scenes(project_id, scenes)
-        _set_state(project_id, step="prompting_done", progress=25,
+        _set_state(project_id, step="prompting_done", progress=48,
                    message=f"Generated {len(scenes)} scene prompts in "
                            f"{timing_log['prompt_seconds']:.1f}s. Starting image generation…",
                    total_scenes=len(scenes),
                    scenes_done=0)
 
-        # ── Step 3: Generate images in parallel ──────────────────────────────
+        # ── Step 5: Generate images in parallel ──────────────────────────────
         step_start = time.monotonic()
         total = len(scenes)
 
         def on_progress(done: int, total: int, scene: dict) -> None:
-            pct = 25 + int(done / total * 75)
+            pct = 48 + int(done / total * 52)
             _save_scenes(project_id, scenes)
             _set_state(
                 project_id,
@@ -374,62 +427,9 @@ def _run_generation(project_id: str, meta: dict) -> None:
         )
 
         timing_log["image_seconds"] = round(time.monotonic() - step_start, 2)
-
-        # ── Step 4: Voice-over generation (ElevenLabs, one MP3 per slot) ─────
-        voice_summary: dict | None = None
-        if config.ELEVEN_API_KEY:
-            voice_start = time.monotonic()
-            _save_scenes(project_id, scenes)
-            total_slots = len({
-                int(s.get("slot_number") or s.get("scene_number") or 0)
-                for s in scenes
-            })
-            _set_state(
-                project_id,
-                step="voicing",
-                progress=92,
-                message=f"Recording voice-overs for {total_slots} scenes…",
-                voice_total=total_slots,
-                voice_done=0,
-            )
-
-            def on_voice_progress(done: int, total: int, _row: dict) -> None:
-                pct = 92 + int(done / max(1, total) * 8)
-                _save_scenes(project_id, scenes)
-                _set_state(
-                    project_id,
-                    step="voicing",
-                    progress=min(99, pct),
-                    message=f"Generated {done} of {total} voice-overs…",
-                    voice_total=total,
-                    voice_done=done,
-                )
-
-            try:
-                scenes, voice_summary = voice_engine.generate_all_voiceovers(
-                    scenes=scenes,
-                    project_dir=project_dir,
-                    on_progress=on_voice_progress,
-                )
-            except Exception as exc:
-                logger.error("Voice-over batch failed: %s", exc, exc_info=True)
-                for s in scenes:
-                    if s.get("voice_status") not in ("done", "error"):
-                        s["voice_status"] = "error"
-                        s["voice_error"] = str(exc)
-                voice_summary = {"error": str(exc)}
-            timing_log["voice_seconds"] = round(time.monotonic() - voice_start, 2)
-        else:
-            logger.info("ELEVEN_API_KEY not set — skipping voice-over generation.")
-            for s in scenes:
-                s["voice_status"] = "skipped"
-                s["voice_error"] = "ELEVEN_API_KEY not configured"
-            timing_log["voice_seconds"] = 0.0
-
         timing_log["total_seconds"] = round(time.monotonic() - project_start, 2)
         timing_log["image_summary"] = image_summary
-        if voice_summary is not None:
-            timing_log["voice_summary"] = voice_summary
+        timing_log["voiceover"] = voiceover_info
         timing_log["finished_at"] = time.time()
 
         # Persist final cost based on actually-successful images.
@@ -523,6 +523,73 @@ def _image_to_mp4(image_path: Path, out_mp4: Path, duration_sec: float) -> None:
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip() or "ffmpeg failed"
         raise RuntimeError(msg)
+
+
+def _parallel_render_export_mp4s(
+    ordered: list[dict],
+    project_dir: Path,
+    tmp_path: Path,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Render scene stills to MP4 with parallel ffmpeg (bounded by EXPORT_FFMPEG_WORKERS)."""
+    workers = max(1, int(config.EXPORT_FFMPEG_WORKERS))
+
+    def _one(scene: dict) -> tuple[str, Path, str]:
+        slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
+        if scene.get("image_status") != "done":
+            raise RuntimeError(
+                f"Scene slot {slot} has no completed image; finish or remove failed rows first."
+            )
+        rel = str(scene.get("image_path", "")).replace("\\", "/")
+        ip = project_dir / rel
+        if not ip.exists():
+            raise RuntimeError(f"Missing image for slot {slot:03d}: {ip.name}")
+
+        dur = float(scene.get("duration") or 0.0)
+        if dur <= 0:
+            dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+
+        mp4_name = f"scene_{slot:03d}.mp4"
+        mp4_path = tmp_path / mp4_name
+        _image_to_mp4(ip, mp4_path, dur)
+        line = (
+            f"{mp4_name}\tslot={slot:03d}\tstart={float(scene.get('start_time', 0)):.3f}\t"
+            f"end={float(scene.get('end_time', 0)):.3f}\tduration={dur:.3f}"
+        )
+        return mp4_name, mp4_path, line
+
+    mp4_jobs: list[tuple[str, Path]] = []
+    manifest_lines: list[str] = []
+    total = len(ordered)
+    done = 0
+    lock = threading.Lock()
+
+    if workers <= 1 or total <= 1:
+        for scene in ordered:
+            name, path, line = _one(scene)
+            mp4_jobs.append((name, path))
+            manifest_lines.append(line)
+            done += 1
+            if on_progress:
+                on_progress(done, total, name)
+        mp4_jobs.sort(key=lambda x: x[0])
+        manifest_lines.sort()
+        return mp4_jobs, manifest_lines
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_one, scene) for scene in ordered]
+        for future in as_completed(futures):
+            name, path, line = future.result()
+            with lock:
+                mp4_jobs.append((name, path))
+                manifest_lines.append(line)
+                done += 1
+                if on_progress:
+                    on_progress(done, total, name)
+
+    mp4_jobs.sort(key=lambda x: x[0])
+    manifest_lines.sort()
+    return mp4_jobs, manifest_lines
 
 
 # ─── Export-job machinery (progress-aware ZIP build) ─────────────────────────
@@ -638,14 +705,16 @@ def _run_export_job(project_id: str, job_id: str) -> None:
         zip_filename = f"{slug}_tatterveil_export.zip"
         zip_path = _export_tmpdir / f"{job_id}.zip"
 
-        # One slot = one MP4 render + (optionally) one WAV pack step. Each
-        # counts toward the progress total so the bar moves smoothly.
-        has_voice_assets = any(
-            (s.get("voice_status") == "done")
-            and (config.PROJECTS_DIR / project_id / str(s.get("voice_path") or "").replace("\\", "/")).exists()
-            for s in ordered
+        # One combined voice-over for the whole video (if present).
+        voiceover = meta.get("voiceover") or {}
+        vo_rel = str(voiceover.get("path") or "").replace("\\", "/")
+        vo_src = project_dir / vo_rel if vo_rel else None
+        has_audio = bool(
+            voiceover.get("status") == "done" and vo_src is not None and vo_src.exists()
         )
-        total_steps = len(ordered) * (2 if has_voice_assets else 1) + 1
+        vo_arcname = f"voiceovers/{voiceover.get('filename') or 'full_voiceover.wav'}" if has_audio else ""
+
+        total_steps = len(ordered) + 1  # MP4 renders + final ZIP packaging step
         _update_export_job(
             job_id,
             status="running",
@@ -657,10 +726,14 @@ def _run_export_job(project_id: str, job_id: str) -> None:
         )
 
         manifest_lines = [
-            "# filename | slot | start_sec | end_sec | duration_sec | voice_filename",
+            "# filename | slot | start_sec | end_sec | duration_sec",
             "# Each MP4 is one still image held for the scene duration on the script timeline.",
-            "# voice_filename references the WAV inside voiceovers/ (empty if no VO).",
         ]
+        if has_audio:
+            manifest_lines.append(
+                f"# Combined narration for the whole video: {vo_arcname} "
+                f"({float(voiceover.get('duration_seconds', 0)):.1f}s)."
+            )
 
         raw_export = {
             "project_meta": meta,
@@ -671,76 +744,28 @@ def _run_export_job(project_id: str, job_id: str) -> None:
 
         with tempfile.TemporaryDirectory(prefix=f"tatterveil_export_{job_id}_") as tmp:
             tmp_path = Path(tmp)
-            mp4_jobs: list[tuple[str, Path]] = []
-            wav_jobs: list[tuple[str, Path]] = []
-            done = 0
-            for s in ordered:
-                slot = int(s.get("slot_number") or s.get("scene_number") or 0)
-                rel = str(s.get("image_path", "")).replace("\\", "/")
-                ip = project_dir / rel
-                if not ip.exists():
-                    _update_export_job(
-                        job_id,
-                        status="error",
-                        stage="failed",
-                        error=f"Missing image for slot {slot:03d}: {ip.name}",
-                    )
-                    return
+            total_mp4 = len(ordered)
 
-                dur = float(s.get("duration") or 0.0)
-                if dur <= 0:
-                    dur = float(s.get("end_time", 0)) - float(s.get("start_time", 0))
-
+            def on_mp4_progress(done: int, total: int, mp4_name: str) -> None:
                 _update_export_job(
                     job_id,
                     stage="rendering_mp4s",
                     current=done,
                     percent=int(done * 100 / total_steps),
-                    message=f"Rendering MP4 {done + 1}/{len(ordered)} — slot {slot:03d} ({dur:.1f}s)",
+                    message=f"Rendering MP4 {done}/{total} — {mp4_name}",
                 )
 
-                mp4_name = f"scene_{slot:03d}.mp4"
-                mp4_path = tmp_path / mp4_name
-                try:
-                    _image_to_mp4(ip, mp4_path, dur)
-                except RuntimeError as exc:
-                    _update_export_job(
-                        job_id,
-                        status="error",
-                        stage="failed",
-                        error=f"ffmpeg failed on slot {slot:03d}: {exc}",
-                    )
-                    return
-
-                mp4_jobs.append((mp4_name, mp4_path))
-                done += 1
-
-                # ── Voice-over WAV packaging (one per slot) ──────────────────
-                wav_name = ""
-                if has_voice_assets:
-                    voice_rel = str(s.get("voice_path") or "").replace("\\", "/")
-                    voice_src = project_dir / voice_rel if voice_rel else None
-                    if (
-                        s.get("voice_status") == "done"
-                        and voice_src is not None
-                        and voice_src.exists()
-                        and voice_src.suffix.lower() == ".wav"
-                    ):
-                        wav_name = f"voiceovers/scene_{slot:03d}.wav"
-                        _update_export_job(
-                            job_id,
-                            stage="rendering_voiceovers",
-                            current=done,
-                            percent=int(done * 100 / total_steps),
-                            message=f"Packing WAV {done}/{total_steps - 1} — slot {slot:03d}",
-                        )
-                        wav_jobs.append((wav_name, voice_src))
-                    done += 1
-
-                manifest_lines.append(
-                    f"{mp4_name}\tslot={slot:03d}\tstart={float(s.get('start_time', 0)):.3f}\t"
-                    f"end={float(s.get('end_time', 0)):.3f}\tduration={dur:.3f}\tvoice={wav_name}"
+            try:
+                mp4_jobs, mp4_manifest_lines = _parallel_render_export_mp4s(
+                    ordered, project_dir, tmp_path, on_progress=on_mp4_progress
                 )
+            except RuntimeError as exc:
+                _update_export_job(
+                    job_id, status="error", stage="failed", error=str(exc)
+                )
+                return
+            manifest_lines.extend(mp4_manifest_lines)
+            done = total_mp4
 
             manifest = tmp_path / "scene_timestamps.txt"
             manifest.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
@@ -761,9 +786,9 @@ def _run_export_job(project_id: str, job_id: str) -> None:
                 zf.write(manifest, arcname="scene_timestamps.txt")
                 zf.write(raw_json, arcname="project_export_metadata.json")
                 for name, pth in sorted(mp4_jobs, key=lambda x: x[0]):
-                    zf.write(pth, arcname=name)
-                for arcname, pth in sorted(wav_jobs, key=lambda x: x[0]):
-                    zf.write(pth, arcname=arcname)
+                    zf.write(pth, arcname=name, compress_type=zipfile.ZIP_STORED)
+                if has_audio:
+                    zf.write(vo_src, arcname=vo_arcname, compress_type=zipfile.ZIP_STORED)
 
         size = zip_path.stat().st_size if zip_path.exists() else 0
         with _export_jobs_lock:
@@ -804,11 +829,24 @@ def _build_export_zip(project_id: str) -> tuple[bytes, str]:
     raw_name = meta.get("name") or "project"
     slug = "".join(c if c.isalnum() or c in "._-" else "_" for c in raw_name)[:80] or "project"
 
+    voiceover = meta.get("voiceover") or {}
+    vo_rel = str(voiceover.get("path") or "").replace("\\", "/")
+    vo_src = project_dir / vo_rel if vo_rel else None
+    has_audio = bool(
+        voiceover.get("status") == "done" and vo_src is not None and vo_src.exists()
+    )
+    vo_arcname = f"voiceovers/{voiceover.get('filename') or 'full_voiceover.wav'}" if has_audio else ""
+
     buf = io.BytesIO()
     lines = [
         "# filename | slot | start_sec | end_sec | duration_sec",
         "# Each MP4 is one still image held for the scene duration on the script timeline.",
     ]
+    if has_audio:
+        lines.append(
+            f"# Combined narration for the whole video: {vo_arcname} "
+            f"({float(voiceover.get('duration_seconds', 0)):.1f}s)."
+        )
 
     raw_export = {
         "project_meta": meta,
@@ -819,32 +857,10 @@ def _build_export_zip(project_id: str) -> tuple[bytes, str]:
 
     with tempfile.TemporaryDirectory(prefix="tatterveil_export_") as tmp:
         tmp_path = Path(tmp)
-        mp4_jobs: list[tuple[str, Path]] = []
-
-        for s in ordered:
-            slot = int(s.get("slot_number") or s.get("scene_number") or 0)
-            if s.get("image_status") != "done":
-                raise RuntimeError(
-                    f"Scene slot {slot} has no completed image; finish or remove failed rows first."
-                )
-            rel = str(s.get("image_path", "")).replace("\\", "/")
-            ip = project_dir / rel
-            if not ip.exists():
-                raise RuntimeError(f"Missing image for slot {slot}: {ip.name}")
-
-            dur = float(s.get("duration") or 0.0)
-            if dur <= 0:
-                dur = float(s.get("end_time", 0)) - float(s.get("start_time", 0))
-
-            mp4_name = f"scene_{slot:03d}.mp4"
-            mp4_path = tmp_path / mp4_name
-            _image_to_mp4(ip, mp4_path, dur)
-            mp4_jobs.append((mp4_name, mp4_path))
-
-            lines.append(
-                f"{mp4_name}\tslot={slot:03d}\tstart={float(s.get('start_time', 0)):.3f}\t"
-                f"end={float(s.get('end_time', 0)):.3f}\tduration={dur:.3f}"
-            )
+        mp4_jobs, mp4_manifest_lines = _parallel_render_export_mp4s(
+            ordered, project_dir, tmp_path
+        )
+        lines.extend(mp4_manifest_lines)
 
         manifest = tmp_path / "scene_timestamps.txt"
         manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -855,7 +871,9 @@ def _build_export_zip(project_id: str) -> tuple[bytes, str]:
             zf.write(manifest, arcname="scene_timestamps.txt")
             zf.write(raw_json, arcname="project_export_metadata.json")
             for name, pth in sorted(mp4_jobs, key=lambda x: x[0]):
-                zf.write(pth, arcname=name)
+                zf.write(pth, arcname=name, compress_type=zipfile.ZIP_STORED)
+            if has_audio:
+                zf.write(vo_src, arcname=vo_arcname, compress_type=zipfile.ZIP_STORED)
 
     return buf.getvalue(), f"{slug}_tatterveil_export.zip"
 
@@ -1102,11 +1120,12 @@ def api_estimate():
     rest_rate = int(data.get("rest_rate", 2))
     resolution = data.get("resolution") or config.DEFAULT_RESOLUTION
     quality = data.get("quality") or config.DEFAULT_QUALITY
+    voice_speed = _parse_voice_speed(data.get("voice_speed", config.DEFAULT_VOICE_SPEED))
 
-    duration = pipeline.estimate_duration(script) if script.strip() else 0.0
+    duration = pipeline.estimate_duration(script, voice_speed) if script.strip() else 0.0
     plan = pipeline.compute_scene_plan(duration, first_rate, rest_rate)
     cost = _estimate_cost(resolution, quality, plan.get("total_scenes", 0))
-    return jsonify({**plan, "cost": cost})
+    return jsonify({**plan, "cost": cost, "voice_speed": voice_speed})
 
 
 @app.route("/api/pricing")
@@ -1132,6 +1151,7 @@ def api_generate():
     resolution = data.get("resolution", config.DEFAULT_RESOLUTION)
     first_rate = int(data.get("first_rate", 3))
     rest_rate = int(data.get("rest_rate", 2))
+    voice_speed = _parse_voice_speed(data.get("voice_speed", config.DEFAULT_VOICE_SPEED))
 
     if not script:
         return jsonify({"error": "Script is required."}), 400
@@ -1175,6 +1195,7 @@ def api_generate():
         "resolution": resolution,
         "first_rate": first_rate,
         "rest_rate": rest_rate,
+        "voice_speed": voice_speed,
         "created_at": time.time(),
         "scene_plan": {},
     }
@@ -1227,11 +1248,6 @@ def api_status(project_id: str):
                 "image_path": s.get("image_path"),
                 "image_status": s.get("image_status", "pending"),
                 "image_error": s.get("image_error"),
-                "voice_path": s.get("voice_path"),
-                "voice_filename": s.get("voice_filename"),
-                "voice_status": s.get("voice_status", "pending"),
-                "voice_error": s.get("voice_error"),
-                "voice_seconds": s.get("voice_seconds"),
                 "slot_has_duplicates": slot in dup_set,
             }
         )
@@ -1252,8 +1268,19 @@ def api_status(project_id: str):
             },
             "cost_estimate": meta.get("cost_estimate"),
             "cost_actual": meta.get("cost_actual"),
+            "voiceover": _voiceover_public(meta.get("voiceover")),
         }
     )
+
+
+def _voiceover_public(vo: dict | None) -> dict | None:
+    """Client-facing view of the combined voice-over (adds a stream URL)."""
+    if not vo or not isinstance(vo, dict):
+        return None
+    out = dict(vo)
+    if vo.get("status") == "done" and vo.get("filename"):
+        out["url"] = f"voiceovers/{vo['filename']}"
+    return out
 
 
 @app.route("/projects/<project_id>")
@@ -1285,6 +1312,7 @@ def project_view(project_id: str):
         is_generating=is_generating,
         cost_estimate=meta.get("cost_estimate"),
         cost_actual=meta.get("cost_actual"),
+        voiceover=_voiceover_public(meta.get("voiceover")),
         regen_parallelism=int(config.REGEN_PARALLELISM),
         scene_type_names=SCENE_TYPE_NAMES,
         scene_type_colors=SCENE_TYPE_COLORS,

@@ -9,11 +9,10 @@ services:
     env_file:
       - .env
     environment:
-      # Optional overrides (uncomment to change without editing .env)
-      # OPENAI_TEXT_MODEL: gpt-5.4-mini
-      # IMAGE_MODEL: gpt-image-2
-      # MAX_WORKERS: "3"
-      # REGEN_PARALLELISM: "4"
+      # Tuned for a multi-core VPS (12 cores / 62 GiB RAM). Adjust down on smaller hosts.
+      MAX_WORKERS: "6"
+      REGEN_PARALLELISM: "6"
+      EXPORT_FFMPEG_WORKERS: "8"
       TZ: UTC
     volumes:
       # Persist all generated projects on the host (same folder you used with python app.py)

@@ -103,27 +103,70 @@ function getSelectedQuality() {
   return el ? el.value : "medium";
 }
 
+function getVoiceSpeed() {
+  const el = document.getElementById("voice_speed");
+  if (!el) return 1.0;
+  const v = parseFloat(el.value);
+  if (isNaN(v)) return 1.0;
+  return Math.max(0.25, Math.min(1.0, Math.round(v * 100) / 100));
+}
+
+function clampVoiceSpeedInput(input) {
+  const v = Math.max(0.25, Math.min(1.0, parseFloat(input.value) || 1.0));
+  const rounded = Math.round(v * 100) / 100;
+  input.value = String(rounded);
+  return rounded;
+}
+
 function initEstimatePanel() {
   const scriptEl    = document.getElementById("script");
   const firstSlider = document.getElementById("first_rate_slider");
   const firstInput  = document.getElementById("first_rate");
   const restSlider  = document.getElementById("rest_rate_slider");
   const restInput   = document.getElementById("rest_rate");
+  const speedSlider = document.getElementById("voice_speed_slider");
+  const speedInput  = document.getElementById("voice_speed");
 
   if (!scriptEl) return;
 
   let debounceTimer;
 
-  function syncSlider(slider, input) {
-    slider.addEventListener("input", () => { input.value = slider.value; scheduleEstimate(); updateTimingHints(); });
+  function syncSlider(slider, input, onSync) {
+    if (!slider || !input) return;
+    slider.addEventListener("input", () => {
+      input.value = slider.value;
+      if (onSync) onSync();
+      scheduleEstimate();
+      updateTimingHints();
+    });
     input.addEventListener("input", () => {
-      const v = Math.max(+input.min, Math.min(+input.max, +input.value || 1));
-      input.value = v; slider.value = v; scheduleEstimate(); updateTimingHints();
+      let v = +input.value;
+      if (input === speedInput) {
+        v = Math.max(+input.min, Math.min(+input.max, v || 1));
+        input.value = v;
+        slider.value = v;
+      } else {
+        v = Math.max(+input.min, Math.min(+input.max, v || 1));
+        input.value = v;
+        slider.value = v;
+      }
+      if (onSync) onSync();
+      scheduleEstimate();
+      updateTimingHints();
+    });
+    input.addEventListener("blur", () => {
+      if (input === speedInput) {
+        const v = clampVoiceSpeedInput(input);
+        slider.value = v;
+        updateVoiceSpeedHint();
+        scheduleEstimate();
+      }
     });
   }
 
   syncSlider(firstSlider, firstInput);
   syncSlider(restSlider, restInput);
+  syncSlider(speedSlider, speedInput, updateVoiceSpeedHint);
 
   scriptEl.addEventListener("input", () => { scheduleEstimate(); });
 
@@ -134,6 +177,16 @@ function initEstimatePanel() {
   function scheduleEstimate() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(fetchEstimate, 300);
+  }
+
+  function updateVoiceSpeedHint() {
+    const hint = document.getElementById("voice-speed-hint");
+    if (!hint) return;
+    const s = getVoiceSpeed();
+    if (s >= 0.95) hint.textContent = "Normal pace — matches typical documentary narration";
+    else if (s >= 0.7) hint.textContent = "Slightly slower — longer video, more breathing room";
+    else if (s >= 0.45) hint.textContent = "Slow pace — noticeably longer narration";
+    else hint.textContent = "Slowest pace — longest video length";
   }
 
   function updateTimingHints() {
@@ -151,6 +204,7 @@ function initEstimatePanel() {
     const restRate  = parseInt(restInput.value,  10) || 2;
     const resolution = getSelectedResolution();
     const quality   = getSelectedQuality();
+    const voiceSpeed = getVoiceSpeed();
     const words     = script.split(/\s+/).filter(Boolean).length;
 
     const anaWords    = document.getElementById("ana-words");
@@ -172,7 +226,7 @@ function initEstimatePanel() {
       const res = await fetch("/api/estimate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, first_rate: firstRate, rest_rate: restRate, resolution, quality }),
+        body: JSON.stringify({ script, first_rate: firstRate, rest_rate: restRate, resolution, quality, voice_speed: voiceSpeed }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -206,7 +260,7 @@ function initEstimatePanel() {
       if (estTotal) estTotal.textContent = data.total_scenes;
       if (calcText) {
         calcText.textContent =
-          `${words.toLocaleString()} words ÷ 150 wpm = ${data.duration_minutes.toFixed(1)} min video`;
+          `${words.toLocaleString()} words at speed ${voiceSpeed} → ~${data.duration_minutes.toFixed(1)} min preview (final length from narration)`;
       }
 
       const c = data.cost || {};
@@ -244,6 +298,7 @@ function initEstimatePanel() {
   });
 
   updateTimingHints();
+  updateVoiceSpeedHint();
   scriptEl.dispatchEvent(new Event("input"));
 }
 
@@ -311,6 +366,7 @@ function initCreateForm() {
     };
     set("cc-resolution", payload.resolution || "—");
     set("cc-quality", payload.quality || "—");
+    set("cc-voice-speed", payload.voice_speed != null ? String(payload.voice_speed) : "—");
     const c = (estimate && estimate.cost) || null;
     set("cc-scenes", estimate ? estimate.total_scenes : "—");
     if (c) {
@@ -375,6 +431,7 @@ function initCreateForm() {
 
     const formData = new FormData(form);
     const payload  = Object.fromEntries(formData.entries());
+    payload.voice_speed = getVoiceSpeed();
 
     let estimate = window._latestEstimate;
     try {
@@ -387,6 +444,7 @@ function initCreateForm() {
           rest_rate:  parseInt(payload.rest_rate,  10) || 2,
           resolution: payload.resolution,
           quality:    payload.quality,
+          voice_speed: payload.voice_speed,
         }),
       });
       if (res.ok) {
@@ -408,7 +466,7 @@ let _lastProgress = -1;
 let _regenTargetEntryId = null;
 
 const TERMINAL_STEPS = ["done", "error"];
-const STEP_ORDER = ["queued", "analysing", "prompting", "prompting_done", "generating", "voicing", "done"];
+const STEP_ORDER = ["queued", "analysing", "voicing", "prompting", "prompting_done", "generating", "done"];
 
 function initProjectPage() {
   if (typeof window.PROJECT_ID === "undefined") return;
@@ -444,6 +502,8 @@ function initProjectPage() {
   initRegenerateModal();
   initExportButton();
   initLightbox();
+
+  if (window.VOICEOVER) updateProjectVoiceover(window.VOICEOVER);
 
   pollStatus();
 }
@@ -574,14 +634,14 @@ function applyStatus(data) {
   const counter = document.getElementById("image-counter");
   const counterDone = document.getElementById("counter-done");
   const counterTotal = document.getElementById("counter-total");
-  if (counter && step === "generating") {
-    counter.style.display = "flex";
-    if (counterDone) counterDone.textContent = data.scenes_done || 0;
-    if (counterTotal) counterTotal.textContent = data.total_scenes || 0;
-  } else if (counter && step === "voicing") {
-    counter.style.display = "flex";
-    if (counterDone) counterDone.textContent = data.voice_done || 0;
-    if (counterTotal) counterTotal.textContent = data.voice_total || 0;
+  if (counter) {
+    if (step === "generating") {
+      counter.style.display = "flex";
+      if (counterDone) counterDone.textContent = data.scenes_done || 0;
+      if (counterTotal) counterTotal.textContent = data.total_scenes || 0;
+    } else {
+      counter.style.display = "none";
+    }
   }
 
   const progressSection = document.getElementById("progress-section");
@@ -591,6 +651,7 @@ function applyStatus(data) {
 
   renderRegenJobsPanel(data.regeneration_jobs || [], data.regeneration);
   updateProjectCostDisplay(data.cost_actual, data.cost_estimate);
+  updateProjectVoiceover(data.voiceover);
 
   if (Array.isArray(data.scenes)) {
     syncSceneGrid(data.scenes);
@@ -630,16 +691,16 @@ function updateStepTrack(currentStep) {
   const stepMap = {
     queued: "step-analysing",
     analysing: "step-analysing",
+    voicing: "step-voicing",
     prompting: "step-prompting",
     prompting_done: "step-prompting",
     generating: "step-generating",
-    voicing: "step-generating",
     done: "step-done",
     error: null,
   };
 
   const activeId = stepMap[currentStep];
-  const stepIds = ["step-analysing", "step-prompting", "step-generating", "step-done"];
+  const stepIds = ["step-analysing", "step-voicing", "step-prompting", "step-generating", "step-done"];
   const activeIdx = stepIds.indexOf(activeId);
 
   stepIds.forEach((id, idx) => {
@@ -691,118 +752,32 @@ function syncSceneGrid(scenes) {
   });
 }
 
-function voiceFilenameFromPath(p) {
-  if (!p) return null;
-  const parts = String(p).split(/[/\\]/);
-  return parts[parts.length - 1] || null;
+function fmtClock(totalSeconds) {
+  const s = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, "0")}`;
 }
 
-function buildVoiceBlockHTML(scene) {
-  const status = scene.voice_status || "pending";
-  const slot = scene.slot_number || scene.scene_number || 0;
-  const filename = status === "done" ? voiceFilenameFromPath(scene.voice_path) : null;
-  let tag = `<span class="scene-voice-tag">queued</span>`;
-  if (status === "done") tag = `<span class="scene-voice-tag scene-voice-tag--ok">ready</span>`;
-  else if (status === "error") tag = `<span class="scene-voice-tag scene-voice-tag--err">failed</span>`;
-  else if (status === "skipped") tag = `<span class="scene-voice-tag scene-voice-tag--skip">skipped</span>`;
+function updateProjectVoiceover(voiceover) {
+  const section = document.getElementById("voiceover-section");
+  const audio = document.getElementById("voiceover-audio");
+  const sub = document.getElementById("voiceover-sub");
+  if (!section || !audio) return;
 
-  let body;
-  if (status === "done" && filename) {
-    body = `<audio class="scene-voice-audio" controls preload="none" src="/projects/${window.PROJECT_ID}/voiceovers/${encodeURIComponent(filename)}"></audio>`;
-  } else if (status === "error") {
-    body = `<p class="scene-voice-error">${escapeHTML(scene.voice_error || "Voice generation failed.")}</p>`;
-  } else if (status === "skipped") {
-    body = `<p class="scene-voice-hint">Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.</p>`;
-  } else {
-    body = `<p class="scene-voice-hint">Voice-over will render after images finish…</p>`;
+  if (!voiceover || voiceover.status !== "done" || !voiceover.url) {
+    section.style.display = "none";
+    return;
   }
 
-  return `
-    <div class="scene-voice" data-slot="${slot}">
-      <p class="scene-section-label scene-voice-label">
-        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-          <path d="M3 4v3M5.5 2.5v6M8 4v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-        </svg>
-        Voice-over ${tag}
-      </p>
-      ${body}
-    </div>`;
-}
-
-function updateSceneVoice(card, scene) {
-  const block = card.querySelector(".scene-voice");
-  if (!block) return;
-  const status = scene.voice_status || "pending";
-  const filename = status === "done" ? voiceFilenameFromPath(scene.voice_path) : null;
-
-  // Refresh status tag.
-  const label = block.querySelector(".scene-voice-label");
-  if (label) {
-    let tagHTML = `<span class="scene-voice-tag">queued</span>`;
-    if (status === "done") tagHTML = `<span class="scene-voice-tag scene-voice-tag--ok">ready</span>`;
-    else if (status === "error") tagHTML = `<span class="scene-voice-tag scene-voice-tag--err">failed</span>`;
-    else if (status === "skipped") tagHTML = `<span class="scene-voice-tag scene-voice-tag--skip">skipped</span>`;
-    const existing = label.querySelector(".scene-voice-tag");
-    if (existing) existing.outerHTML = tagHTML;
-    else label.insertAdjacentHTML("beforeend", " " + tagHTML);
-  }
-
-  // Replace body if status changed.
-  const existingAudio = block.querySelector("audio.scene-voice-audio");
-  const existingErr = block.querySelector(".scene-voice-error");
-  const existingHint = block.querySelector(".scene-voice-hint");
-
-  if (status === "done" && filename) {
-    const src = `/projects/${window.PROJECT_ID}/voiceovers/${encodeURIComponent(filename)}`;
-    if (existingAudio) {
-      if (existingAudio.getAttribute("src") !== src) existingAudio.setAttribute("src", src);
-    } else {
-      if (existingErr) existingErr.remove();
-      if (existingHint) existingHint.remove();
-      const audio = document.createElement("audio");
-      audio.className = "scene-voice-audio";
-      audio.controls = true;
-      audio.preload = "none";
-      audio.src = src;
-      block.appendChild(audio);
-    }
-  } else {
-    if (existingAudio) existingAudio.remove();
-    if (status === "error") {
-      const msg = scene.voice_error || "Voice generation failed.";
-      if (existingErr) existingErr.textContent = msg;
-      else if (!block.querySelector(".scene-voice-error")) {
-        const p = document.createElement("p");
-        p.className = "scene-voice-error";
-        p.textContent = msg;
-        if (existingHint) existingHint.remove();
-        block.appendChild(p);
-      }
-    } else {
-      if (existingErr) existingErr.remove();
-      const hintText =
-        status === "skipped"
-          ? null
-          : "Voice-over will render after images finish…";
-      if (status === "skipped") {
-        if (existingHint) {
-          existingHint.innerHTML = "Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.";
-        } else {
-          const p = document.createElement("p");
-          p.className = "scene-voice-hint";
-          p.innerHTML = "Set <code>ELEVEN_API_KEY</code> in .env to enable voice-overs.";
-          block.appendChild(p);
-        }
-      } else {
-        if (existingHint) existingHint.textContent = hintText;
-        else {
-          const p = document.createElement("p");
-          p.className = "scene-voice-hint";
-          p.textContent = hintText;
-          block.appendChild(p);
-        }
-      }
-    }
+  section.style.display = "block";
+  const src = `/projects/${window.PROJECT_ID}/${voiceover.url}`;
+  if (audio.getAttribute("src") !== src) audio.setAttribute("src", src);
+  if (sub) {
+    const chunks = voiceover.chunks || 1;
+    sub.textContent =
+      `${fmtClock(voiceover.duration_seconds)} · ${chunks} chunk${chunks === 1 ? "" : "s"} · ` +
+      "one combined audio for the whole video";
   }
 }
 
@@ -856,8 +831,6 @@ function updateSceneCardMedia(card, scene) {
   }
   const regBtn = card.querySelector(".btn-regenerate-variant");
   if (regBtn) regBtn.disabled = scene.image_status !== "done";
-
-  updateSceneVoice(card, scene);
 
   let dupBar = card.querySelector(".scene-dup-banner");
   if (scene.slot_has_duplicates) {
@@ -977,7 +950,6 @@ function buildSceneCard(scene, idx) {
         </p>
         ${scriptSegHtml}
       </div>
-      ${buildVoiceBlockHTML(scene)}
       <div class="scene-card-actions">
         <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}" ${scene.image_status === "done" ? "" : "disabled"}>Regenerate</button>
         <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}">Delete variant</button>
@@ -987,7 +959,7 @@ function buildSceneCard(scene, idx) {
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
             <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          Prompt sent to gpt-image-2
+          View image prompt
         </summary>
         <div class="scene-prompt-body">
           <p class="scene-prompt-label-inner">Positive prompt:</p>

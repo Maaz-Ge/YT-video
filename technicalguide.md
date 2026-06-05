@@ -10,12 +10,12 @@ This document explains how each major subsystem fits together end-to-end: data m
 |------|------|
 | `app.py` | Flask app: routes, persisted `status.json`, scene CRUD, ZIP export, regenerate worker orchestration, voice-over stage. |
 | `config.py` | Environment variables, paths (`PROJECTS_DIR`), model names, quality/resolution presets, ElevenLabs settings. |
-| `engine/pipeline.py` | Duration estimate → scene plan → **deterministic equal-word split** → LLM enrichment/prompt → parallel image generation → prompt refinement for regeneration. |
-| `engine/voice.py` | ElevenLabs TTS: one MP3 per timeline slot, parallel workers, retry-with-backoff. |
+| `engine/pipeline.py` | Scene plan (from the measured audio length) → **deterministic equal-word split** → LLM enrichment/prompt → parallel image generation → prompt refinement for regeneration. |
+| `engine/voice.py` | ElevenLabs TTS: chunk the script under the 10k-char cap, render each chunk with a fixed seed + neighbour context, concatenate into **one combined WAV**, measure its duration. |
 | `engine/style_guide.py` | Tatterveil rules and the **system** prompt for scene enrichment + image prompt generation. |
-| `engine/scene_utils.py` | Stable `entry_id`s, filenames (`scene_001.png`, `scene_001.mp3`), sorting, duplicate-slot detection. |
-| `templates/` | Jinja HTML; `project.html` SSR scene cards + modal + per-scene `<audio>` player. |
-| `static/js/app.js` | Form handling, polling, grid sync, regenerate modal, export download, voice player sync. |
+| `engine/scene_utils.py` | Stable `entry_id`s, image filenames (`scene_001.png`), sorting, duplicate-slot detection. |
+| `templates/` | Jinja HTML; `project.html` SSR scene cards + modal + a single combined-voice-over `<audio>` player. |
+| `static/js/app.js` | Form handling, polling, grid sync, regenerate modal, export download, combined voice-over player sync. |
 | `projects/<id>/` | Per-project folder: `meta.json`, `status.json`, `scenes.json`, `timing.json`, `images/`, `voiceovers/`. |
 
 ---
@@ -24,12 +24,12 @@ This document explains how each major subsystem fits together end-to-end: data m
 
 ```
 projects/<project_id>/
-  meta.json           # User-facing settings: title, script, style, quality, resolution, rates, scene_plan, created_at
-  status.json         # Live step, progress, messages, optional regeneration flag, voice_total/voice_done
+  meta.json           # User-facing settings: title, script, ..., scene_plan, voiceover{path,duration_seconds,chunks,...}
+  status.json         # Live step, progress, messages, regeneration flag, voice_total/voice_done (chunk counts)
   scenes.json         # Array of **scene rows** (see §3)
-  timing.json         # Written when initial batch finishes: step timings + image_summary + voice_summary
+  timing.json         # Written when generation finishes: step timings + image_summary + voiceover info
   images/             # PNG outputs (one per scene variant)
-  voiceovers/         # MP3 voice-overs (one per timeline slot; variants share)
+  voiceovers/         # full_voiceover.wav — ONE combined narration for the whole script
 ```
 
 - **`meta.script`** holds the full original script (also duplicated inside export metadata for archival).
@@ -51,18 +51,29 @@ Each element is one **variant** of a **timeline slot**:
 | `prompt`, `negative_prompt` | Text passed (directly or merged) into image generation. |
 | `image_filename`, `image_path` | Relative paths under the project dir, e.g. `images/scene_003_v1.png`. |
 | `image_status` | `pending` → `done` or `error`. |
-| `voice_filename`, `voice_path` | Relative paths to the slot's voice-over, e.g. `voiceovers/scene_003.mp3`. |
-| `voice_status` | `pending` → `done` / `error` / `skipped` (when `ELEVEN_API_KEY` is not set). |
-| `voice_error`, `voice_seconds` | Failure reason and wall-clock seconds for the TTS call. |
 | `regenerated_from_entry_id` | Set on new rows created by regenerate (audit). |
+
+Voice-over is **not** a per-scene field. There is one combined narration for the
+whole video stored in `meta["voiceover"]`:
+
+```jsonc
+"voiceover": {
+  "status": "done",                       // done | error | skipped
+  "path": "voiceovers/full_voiceover.wav",
+  "filename": "full_voiceover.wav",
+  "duration_seconds": 510.3,              // measured audio length → drives the scene plan
+  "chunks": 3,                            // number of ElevenLabs requests stitched together
+  "voice_id": "...", "model_id": "...", "output_format": "wav_44100"
+}
+```
 
 ### Filenames
 
 - Slot `N`, variant `0`: `scene_NNN.png`
 - Slot `N`, variant `≥1`: `scene_NNN_vV.png`
-- Slot `N` voice-over (shared by all variants of that slot): `scene_NNN.mp3`
+- Combined narration for the whole video: `voiceovers/full_voiceover.wav`
 
-`engine/scene_utils.ensure_scene_entries()` normalizes older projects: assigns missing `entry_id`, aligns `slot_number`, and derives `image_filename` from `image_path` when needed. It also seeds `voice_filename` / `voice_status` for older rows. `_scenes_live()` in `app.py` persists those migrations once and marks legacy projects (created before VO support) as `voice_status="skipped"`.
+`engine/scene_utils.ensure_scene_entries()` normalizes older projects: assigns missing `entry_id`, aligns `slot_number`, and derives `image_filename` from `image_path` when needed. `_scenes_live()` in `app.py` persists those migrations once.
 
 ### Duplicate slots
 
@@ -75,15 +86,21 @@ A **duplicate** means: more than one row shares the same `slot_number`. That is 
 ## 4. Generation pipeline (initial project)
 
 Implemented in `_run_generation()` + `engine/pipeline.py` + `engine/voice.py`.
+The voice-over is generated **first** because the measured audio length is the
+real video duration that drives scene splitting.
 
-1. **Analyse** — `estimate_duration(script)` uses word count ÷ `WORDS_PER_MINUTE` (**120 wpm**, calibrated to ElevenLabs `speed=0.7`). `compute_scene_plan()` applies dual rates (first segment vs rest).
-2. **Split deterministically** — `compute_equal_segments(script, scene_plan)` partitions the script into **equal-word chunks** within each segment of the timeline. The first 5 minutes get `first_segment_scenes` slots of equal word count; the remainder gets `rest_segment_scenes` slots of equal word count. Time per scene is also equal within each segment. The LLM never re-splits the script.
-3. **Enrich + prompt** — Single chat completion with JSON output; `split_and_prompt()` passes the locked segments to the LLM, which adds `scene_type`, `time_period`, `prompt`, `negative_prompt`, etc. Locked timing/`script_segment` fields are always honoured from the deterministic split when merging the LLM response.
-4. **Normalize rows** — `ensure_scene_entries(scenes)` adds ids, image filenames, and voice filenames.
-5. **Images** — `generate_all_images()` uses a `ThreadPoolExecutor` (`MAX_WORKERS`). Each future is keyed by **`entry_id`**, not `scene_number`, so duplicate slots would not overwrite each other.
-6. **Voice-overs** — `voice_engine.generate_all_voiceovers()` calls ElevenLabs once per **unique slot** (variants share); writes `voiceovers/scene_NNN.mp3` and stamps `voice_status` / `voice_seconds`. `VOICE_WORKERS` controls parallelism (default 3). If `ELEVEN_API_KEY` is empty, the step is skipped and every row is marked `voice_status="skipped"`.
+1. **Analyse** — light pass over the script.
+2. **Voice-over (whole script)** — `voice_engine.generate_full_voiceover()`:
+   - `chunk_script()` splits the script into ordered pieces ≤ `VOICE_MAX_CHARS` (default 9000, under ElevenLabs' 10k hard cap), breaking on paragraphs → sentences → words.
+   - Each chunk is rendered sequentially with the **same** `voice_id` / `model_id` / `voice_settings` (speed **1.0**), a **fixed `ELEVEN_SEED`**, and `previous_text` / `next_text` context so the timbre and prosody stay identical across chunk boundaries.
+   - Chunks are concatenated with the stdlib `wave` module into `voiceovers/full_voiceover.wav`, and its duration is measured from the WAV header (no ffmpeg/ffprobe needed for audio).
+   - The result is stored in `meta["voiceover"]`. If `ELEVEN_API_KEY` is empty or the call fails, the step is skipped/errored and duration falls back to `estimate_duration(script)` so images still generate.
+3. **Scene plan** — `compute_scene_plan(duration_from_audio, first_rate, rest_rate)` applies dual rates (first 5 min vs rest). `cost_estimate` is recomputed from the real scene count.
+4. **Split deterministically** — `compute_equal_segments(script, scene_plan)` partitions the script into **equal-word chunks** within each segment of the timeline, deriving each scene's `start_time` / `end_time` from the audio-based plan. The LLM never re-splits the script.
+5. **Enrich + prompt** — `split_and_prompt()` passes the locked segments to the LLM, which adds `scene_type`, `time_period`, `prompt`, `negative_prompt`, etc. Locked timing/`script_segment` fields are always honoured when merging.
+6. **Images** — `generate_all_images()` uses a `ThreadPoolExecutor` (`MAX_WORKERS`). Each future is keyed by **`entry_id`**, not `scene_number`, so duplicate slots would not overwrite each other.
 
-Both image and voice workers call `on_progress` which persists `scenes.json` and updates `status.json` (with `scenes_done` / `total_scenes` for images, `voice_done` / `voice_total` for voice) so the UI can show partial results.
+Progress (`status.json`): analyse ~3-5%, voice-over 8-36% (with `voice_done` / `voice_total` = chunks rendered), prompts 38-48%, images 48-100%.
 
 ---
 
@@ -211,8 +228,8 @@ Job dict (public fields):
 | Field | Meaning |
 |-------|---------|
 | `status` | `queued` / `running` / `done` / `error`. |
-| `stage` | `queued` / `rendering_mp4s` / `rendering_voiceovers` / `zipping` / `ready` / `blocked` / `failed`. |
-| `percent` | 0–100, derived from `current / total` where `total = num_scenes * (2 if voice present else 1) + 1` (one step per MP4, one per WAV conversion, plus the final zip-write step). |
+| `stage` | `queued` / `rendering_mp4s` / `zipping` / `ready` / `blocked` / `failed`. |
+| `percent` | 0–100, derived from `current / total` where `total = num_scenes + 1` (one step per MP4 + the final zip-write step that also bundles the combined audio). |
 | `current`, `total` | Numeric progress. |
 | `message` | Human-friendly stage text like `"Rendering MP4 12/30 — slot 012 (4.0s)"`. |
 | `file_name`, `size_bytes` | Filled in when ready. |
@@ -225,9 +242,9 @@ The UI opens a modal with a progress bar that polls `/exports/<job_id>` every 70
 ZIP contents:
 
 - `scene_NNN.mp4` per slot, in increasing slot order, with `duration = scene.duration` (or `end_time − start_time`).
-- `voiceovers/scene_NNN.wav` per slot (44.1 kHz stereo PCM, converted from the ElevenLabs MP3 with `ffmpeg`). Only present for slots whose `voice_status == "done"`.
-- `scene_timestamps.txt` — tab-separated manifest (filename, slot, start, end, duration, voice filename).
-- `project_export_metadata.json` — raw `meta`, `timing` (including `voice_summary`), full `scenes` array, `exported_at`.
+- `voiceovers/full_voiceover.wav` — the single combined narration for the whole video (present when `meta.voiceover.status == "done"`).
+- `scene_timestamps.txt` — tab-separated manifest (filename, slot, start, end, duration) with a header line referencing the combined audio file.
+- `project_export_metadata.json` — raw `meta` (including `voiceover`), `timing`, full `scenes` array, `exported_at`.
 
 **Requirement:** `ffmpeg` on `PATH`. The export job fails fast with stage `failed` and a clear error message when missing.
 
@@ -240,7 +257,8 @@ ZIP contents:
 | POST | `/api/estimate` | Scene-count estimate + cost (`{ ...plan, cost: {...} }`). |
 | GET | `/api/pricing` | Raw pricing table for UI consumers. |
 | POST | `/api/generate` | New project + start `_run_generation` thread. |
-| GET | `/api/projects/<id>/status` | Poll: `step`, `progress`, `scenes[]`, `duplicate_slots`, `export_blocked`, `regeneration_jobs[]`, `regeneration{busy,active_count,max_parallel}`, `cost_estimate`, `cost_actual`. |
+| GET | `/api/projects/<id>/status` | Poll: `step`, `progress`, `scenes[]`, `duplicate_slots`, `export_blocked`, `regeneration_jobs[]`, `regeneration{...}`, `cost_estimate`, `cost_actual`, `voiceover{status,url,duration_seconds,chunks}`. |
+| GET | `/projects/<id>/voiceovers/<filename>` | Stream the combined voice-over audio (`full_voiceover.wav`). |
 | POST | `/api/projects/<id>/exports` | Start a progress-aware ZIP export job. |
 | GET | `/api/projects/<id>/exports/<job_id>` | Poll job status / percent. |
 | GET | `/api/projects/<id>/exports/<job_id>/file` | Download finished ZIP. |
@@ -261,6 +279,7 @@ ZIP contents:
 - **Regeneration queue card** — Above the grid, lists every in-flight + recently-finished job with state label (`Composing new prompt…` / `Generating new image…` / `Done` / error). An overlay badge on the new pending card mirrors the state. Finished jobs auto-disappear after 60s server-side.
 - **Cost preview + confirmation** — Live cost rendered in the estimate panel; the Generate button opens a confirmation modal showing resolution / quality / scenes / per-image / images subtotal / prompt overhead / total before any work starts. The project page settings card shows `~$X.XXXX` estimate, then `$X.XXXX` final once generation completes.
 - **Export progress modal** — Replaces the legacy direct download. Bar + percent + stage message; auto-triggers the browser download when the job reports `status="done"`.
+- **Combined voice-over player** — `updateProjectVoiceover(data.voiceover)` shows a single `<audio>` player (the `#voiceover-section`) above the scene grid once the narration is ready; scene cards themselves no longer carry audio.
 - **Read more** — Uses `.seg-trunc` / `.seg-full` / `.btn-expand-text` with delegated clicks (no inline `onclick` with huge escaped strings).
 - **Initial SSR** — `initProjectPage()` seeds progress bar width and hides the progress strip when `INIT_STEP` is `done` or `error`.
 
@@ -277,11 +296,13 @@ ZIP contents:
 ## 13. Configuration & secrets
 
 - `OPENAI_API_KEY` required.
-- `ELEVEN_API_KEY` optional — when set, every scene gets a voice-over via ElevenLabs `eleven_multilingual_v2`, voice `VuLPiW02W0Qm8465ksBZ`, with `stability=0.26`, `similarity_boost=0.33`, `style=0.07`, `use_speaker_boost=True`, `speed=0.7`. All overridable via `ELEVEN_VOICE_ID`, `ELEVEN_MODEL_ID`, `ELEVEN_STABILITY`, `ELEVEN_SIMILARITY_BOOST`, `ELEVEN_STYLE`, `ELEVEN_SPEED`.
+- `ELEVEN_API_KEY` optional — when set, the whole script is narrated via ElevenLabs `eleven_multilingual_v2`, voice `VuLPiW02W0Qm8465ksBZ`, with `stability=0.26`, `similarity_boost=0.33`, `style=0.07`, `use_speaker_boost=True`, `speed=1.0`. All overridable via `ELEVEN_VOICE_ID`, `ELEVEN_MODEL_ID`, `ELEVEN_STABILITY`, `ELEVEN_SIMILARITY_BOOST`, `ELEVEN_STYLE`, `ELEVEN_SPEED`.
+- `ELEVEN_SEED` (default `12345`) — fixed seed so every chunk of the combined audio shares the same timbre.
+- `ELEVEN_OUTPUT_FORMAT` (default `wav_44100`) — must be a `wav_*` format; the chunks are concatenated with the stdlib `wave` module.
+- `VOICE_MAX_CHARS` (default `9000`) — max characters per ElevenLabs request (hard cap is 10,000). The script is chunked below this and stitched together.
 - `OPENAI_TEXT_MODEL`, `IMAGE_MODEL` override defaults (`config.py`).
 - `REGEN_PARALLELISM` (default `4`) — max concurrent regeneration image renders.
-- `VOICE_WORKERS` (default `3`) — max concurrent ElevenLabs TTS requests during voice-over generation.
-- `WORDS_PER_MINUTE` (default `120`, was 150 pre-VO) — narration pace used by `estimate_duration` and the deterministic split. 120 wpm aligns the on-screen scene length with the spoken length at ElevenLabs `speed=0.7`.
+- `WORDS_PER_MINUTE` (default `150`) — **preview only**. The real duration comes from the measured voice-over; this constant just powers the pre-generation scene-count + cost estimate.
 - `IMAGE_COSTS` and `PROMPT_GENERATION_FLAT_COST` — pricing inputs for the cost preview (voice-over cost is governed by your ElevenLabs plan and is not included in this estimate).
 - `.env` is loaded from this package directory or sibling `image_generator/.env`.
 
@@ -290,9 +311,10 @@ ZIP contents:
 ## 14. Operational limits & failure modes
 
 - Partial image failures leave `image_status: error`; ZIP export aborts until fixed or rows removed manually.
-- Partial voice failures leave `voice_status: error` on individual rows but **do not block** the rest of the pipeline or the export; the failing slot simply ships without a WAV. The corresponding row in `scene_timestamps.txt` shows an empty `voice=` column.
-- Export job missing ffmpeg → job ends with `status="error"`, `stage="failed"`, and a clear error message that the UI shows in the progress modal. ffmpeg is also required to transcode MP3 voice-overs to WAV during export.
-- Regeneration jobs that fail mid-flight leave the new variant row with `image_status="error"` and the job in `state="error"`; the user can delete the failed variant from the card. Voice-overs are **per-slot, not per-variant**, so regenerating an image does not re-render the audio.
+- If voice generation fails (or `ELEVEN_API_KEY` is unset), `meta.voiceover.status` becomes `error`/`skipped` and the pipeline **falls back** to `estimate_duration(script)` for the scene plan, so images still generate. The export simply omits the audio file in that case.
+- A single ElevenLabs chunk failing all retries fails the whole voice-over (the script must read end-to-end); the project continues with the estimated duration.
+- Export job missing ffmpeg → job ends with `status="error"`, `stage="failed"`. ffmpeg is required for the MP4 chunks; the combined audio is already a WAV and is bundled as-is (no transcode).
+- Regeneration jobs that fail mid-flight leave the new variant row with `image_status="error"`; the user can delete the failed variant. The combined voice-over is project-level, so regenerating an image never touches the audio.
 - Export ZIPs live in the system temp directory and are auto-cleaned 30 min after the job finishes.
 
 This should be enough for a new engineer to trace any request from the browser → JSON stores → worker threads → OpenAI APIs → filesystem.

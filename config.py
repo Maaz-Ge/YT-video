@@ -21,16 +21,21 @@ ELEVEN_MODEL_ID: str = os.getenv("ELEVEN_MODEL_ID", "eleven_multilingual_v2")
 # Example valid values: wav_44100, wav_48000, mp3_44100_128, pcm_44100.
 ELEVEN_OUTPUT_FORMAT: str = os.getenv("ELEVEN_OUTPUT_FORMAT", "wav_44100")
 # Voice settings calibrated for the documentary delivery (matches test11labs.py).
+# speed=1.0 is the natural pace; keep the rest fixed so every chunk of the
+# combined voice-over sounds identical.
 ELEVEN_VOICE_SETTINGS: dict = {
     "stability":        float(os.getenv("ELEVEN_STABILITY",        "0.26")),
     "similarity_boost": float(os.getenv("ELEVEN_SIMILARITY_BOOST", "0.33")),
     "style":            float(os.getenv("ELEVEN_STYLE",            "0.07")),
     "use_speaker_boost": True,
-    "speed":            float(os.getenv("ELEVEN_SPEED",            "0.7")),
+    "speed":            float(os.getenv("ELEVEN_SPEED",            "1.0")),
 }
-# Parallel workers for VO generation — ElevenLabs allows concurrent requests on
-# paid plans; tune via env if you hit rate limits.
-VOICE_WORKERS: int = int(os.getenv("VOICE_WORKERS", "3"))
+# Fixed seed → deterministic, consistent timbre across every chunk of the
+# combined voice-over (so chunk boundaries don't drift in tone).
+ELEVEN_SEED: int = int(os.getenv("ELEVEN_SEED", "12345"))
+# ElevenLabs caps a single text-to-speech request at 10,000 characters; we chunk
+# below that with headroom, then concatenate the chunks into one audio file.
+VOICE_MAX_CHARS: int = int(os.getenv("VOICE_MAX_CHARS", "9000"))
 
 # ── gpt-image-2 resolution presets (all 16:9) ────────────────────────────────
 # User picks resolution AND quality independently on the creation form.
@@ -46,16 +51,21 @@ QUALITY_OPTIONS: tuple = ("low", "medium", "high")
 DEFAULT_QUALITY: str = "medium"
 
 # ── Narration pacing ──────────────────────────────────────────────────────────
-# 120 wpm matches ElevenLabs speed=0.7 — 150 words then ≈ 1:12 of audio, so we
-# divide the script by 120 to keep the on-screen scene length ≈ the spoken length.
-WORDS_PER_MINUTE: int = 120
+# PREVIEW ONLY. The real video duration now comes from the generated ElevenLabs
+# voice-over (we measure the audio length). This constant is only used for the
+# pre-generation estimate (live scene-count + cost preview). 150 wpm is a good
+# approximation for speed=1.0 narration.
+WORDS_PER_MINUTE: int = 150
 MIN_DURATION: float   = 1.0     # minimum video duration in minutes
 FIRST_SEGMENT: int    = 5       # minutes before the scene-rate switches
+DEFAULT_VOICE_SPEED: float = 1.0   # ElevenLabs narration speed (0.25–1.0); locked per project at create time
 
 # ── Generation settings ───────────────────────────────────────────────────────
-MAX_WORKERS: int  = 3
+MAX_WORKERS: int = int(os.getenv("MAX_WORKERS", "3"))
 MAX_RETRIES: int  = 3
 RETRY_DELAY: float = 2.5
+# Parallel ffmpeg encodes during ZIP export (CPU-bound; safe to raise on multi-core VPS).
+EXPORT_FFMPEG_WORKERS: int = int(os.getenv("EXPORT_FFMPEG_WORKERS", "4"))
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 PROJECTS_DIR: Path = Path(__file__).parent / "projects"
@@ -76,4 +86,4 @@ PROMPT_GENERATION_FLAT_COST: float = 1.00
 # ── Regeneration queue ───────────────────────────────────────────────────────
 # Max simultaneous regeneration *image* renders (matches the OpenAI image
 # parallelism the provider supports). Additional jobs queue up.
-REGEN_PARALLELISM: int = 4
+REGEN_PARALLELISM: int = int(os.getenv("REGEN_PARALLELISM", "4"))

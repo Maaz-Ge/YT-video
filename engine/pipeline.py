@@ -36,10 +36,17 @@ def _get_client() -> OpenAI:
 
 # ─── 1. Duration estimation ───────────────────────────────────────────────────
 
-def estimate_duration(script: str) -> float:
-    """Return estimated video duration in minutes based on word count."""
+def estimate_duration(script: str, voice_speed: float = 1.0) -> float:
+    """Return estimated video duration in minutes (preview only).
+
+    Real duration comes from the generated voice-over. Slower narration speed
+    (lower ElevenLabs speed value) produces longer audio, so the estimate
+    scales inversely with ``voice_speed``.
+    """
     words = len(script.split())
     raw = words / config.WORDS_PER_MINUTE
+    speed = max(0.25, min(1.0, float(voice_speed or 1.0)))
+    raw = raw / speed
     return max(raw, config.MIN_DURATION)
 
 

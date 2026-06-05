@@ -291,3 +291,9 @@ docker compose up
 ```
 
 Visit http://localhost:5001 — `Ctrl+C` stops it; use `docker compose up -d` for background.
+
+---
+
+## Server feels slow?
+
+See **[SERVER-PERFORMANCE.md](./SERVER-PERFORMANCE.md)** for a step-by-step SSH checklist (CPU, RAM, disk, ffmpeg export, logs).

@@ -1,25 +1,39 @@
 """
-ElevenLabs voice-over generation per scene.
+ElevenLabs voice-over generation — single combined narration for the whole script.
 
-One WAV per timeline slot (variants share the same audio because the
-script_segment is fixed per slot).
+Flow:
+  1. chunk_script()           — split the script under ElevenLabs' 10k-char limit.
+  2. generate_full_voiceover()— render each chunk sequentially with a fixed seed
+                                 and neighbour-text context (so the timbre stays
+                                 identical across chunks), then concatenate every
+                                 chunk into one WAV file.
+  3. The combined file's measured length is the *actual* video duration that
+     drives scene splitting downstream.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import re
+import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import wave
 from pathlib import Path
 from typing import Callable
 
 import config
-from engine.scene_utils import voice_filename_for_scene
 
 logger = logging.getLogger(__name__)
 
 _eleven_client = None
 _eleven_voice_settings_cls = None
+# Whether the installed elevenlabs SDK accepts the consistency kwargs
+# (seed / previous_text / next_text). Disabled automatically on first TypeError.
+_supports_extras = True
+
+# Context window passed as previous_text / next_text for prosody continuity.
+_CONTEXT_CHARS = 500
 
 
 def _get_client():
@@ -46,150 +60,243 @@ def _get_client():
     return _eleven_client, _eleven_voice_settings_cls
 
 
-def voice_output_path(scene: dict, project_dir: Path) -> Path:
-    voices_dir = project_dir / "voiceovers"
-    fn = scene.get("voice_filename") or voice_filename_for_scene(scene)
-    return voices_dir / fn
+# ─── Script chunking (stay under the 10k-char request limit) ──────────────────
+
+def _split_sentences(text: str, max_chars: int) -> list[str]:
+    """Split a long block into sentence-sized pieces, hard-splitting on words
+    only when a single sentence still exceeds max_chars."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    out: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) <= max_chars:
+            out.append(s)
+            continue
+        cur = ""
+        for w in s.split():
+            if len(cur) + len(w) + 1 <= max_chars:
+                cur = (cur + " " + w).strip()
+            else:
+                if cur:
+                    out.append(cur)
+                cur = w
+        if cur:
+            out.append(cur)
+    return out
 
 
-def generate_voice(scene: dict, project_dir: Path) -> tuple[Path, float]:
+def chunk_script(script: str, max_chars: int | None = None) -> list[str]:
     """
-    Render the scene's script_segment to a WAV voice clip via ElevenLabs.
-
-    Returns (output_path, elapsed_seconds).
+    Split the script into ordered chunks, each <= max_chars characters, breaking
+    on paragraph boundaries first, then sentences, then words. Order is preserved
+    so the concatenated audio reads the script start-to-finish.
     """
-    text = (scene.get("script_segment") or "").strip()
+    if max_chars is None:
+        max_chars = int(config.VOICE_MAX_CHARS)
+    text = (script or "").strip()
     if not text:
-        raise RuntimeError("script_segment is empty for this scene")
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    paragraphs = re.split(r"\n\s*\n", text)
+    chunks: list[str] = []
+    cur = ""
+
+    def flush() -> None:
+        nonlocal cur
+        if cur.strip():
+            chunks.append(cur.strip())
+        cur = ""
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) > max_chars:
+            # Paragraph itself too big → break into sentences.
+            for sent in _split_sentences(para, max_chars):
+                if len(cur) + len(sent) + 1 <= max_chars:
+                    cur = (cur + " " + sent).strip()
+                else:
+                    flush()
+                    cur = sent
+        else:
+            joined_len = len(cur) + len(para) + 2
+            if cur and joined_len <= max_chars:
+                cur = cur + "\n\n" + para
+            elif not cur:
+                cur = para
+            else:
+                flush()
+                cur = para
+    flush()
+    return chunks
+
+
+# ─── WAV utilities (no external deps) ─────────────────────────────────────────
+
+def _wav_duration_seconds(path: Path) -> float:
+    with contextlib.closing(wave.open(str(path), "rb")) as w:
+        frames = w.getnframes()
+        rate = w.getframerate()
+        return (frames / float(rate)) if rate else 0.0
+
+
+def _concat_wav_files(paths: list[Path], out_path: Path) -> None:
+    """Concatenate same-format WAV files into one using the stdlib wave module."""
+    if not paths:
+        raise RuntimeError("No audio chunks to concatenate.")
+    with contextlib.closing(wave.open(str(out_path), "wb")) as out:
+        params_set = False
+        for p in paths:
+            with contextlib.closing(wave.open(str(p), "rb")) as w:
+                if not params_set:
+                    out.setparams(w.getparams())
+                    params_set = True
+                out.writeframes(w.readframes(w.getnframes()))
+
+
+# ─── ElevenLabs convert (with consistency kwargs + graceful fallback) ────────
+
+def _convert_chunk(client, text: str, voice_settings, previous_text: str | None,
+                   next_text: str | None):
+    """Call text_to_speech.convert with consistency kwargs; fall back if the
+    installed SDK version doesn't accept them."""
+    global _supports_extras
+    base = dict(
+        voice_id=config.ELEVEN_VOICE_ID,
+        model_id=config.ELEVEN_MODEL_ID,
+        text=text,
+        output_format=config.ELEVEN_OUTPUT_FORMAT,
+        voice_settings=voice_settings,
+    )
+    if _supports_extras:
+        extras = {"seed": int(config.ELEVEN_SEED)}
+        if previous_text:
+            extras["previous_text"] = previous_text
+        if next_text:
+            extras["next_text"] = next_text
+        try:
+            return client.text_to_speech.convert(**base, **extras)
+        except TypeError as exc:
+            logger.warning(
+                "ElevenLabs SDK rejected consistency kwargs (%s); retrying without them.",
+                exc,
+            )
+            _supports_extras = False
+    return client.text_to_speech.convert(**base)
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+def generate_full_voiceover(
+    script: str,
+    project_dir: Path,
+    speed: float | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict:
+    """
+    Render the entire script to a single combined WAV voice-over.
+
+    Returns a dict:
+        {
+          "status": "done",
+          "path": "voiceovers/full_voiceover.wav",   # relative to project_dir
+          "filename": "full_voiceover.wav",
+          "duration_seconds": <float>,
+          "chunks": <int>,
+          "voice_id": ..., "model_id": ..., "output_format": ...,
+        }
+    """
+    text = (script or "").strip()
+    if not text:
+        raise RuntimeError("Script is empty — nothing to voice.")
+
+    fmt = str(config.ELEVEN_OUTPUT_FORMAT)
+    if not fmt.startswith("wav"):
+        raise RuntimeError(
+            "The combined voice-over requires a WAV output format. "
+            "Set ELEVEN_OUTPUT_FORMAT to a wav_* value (e.g. wav_44100)."
+        )
 
     client, VoiceSettings = _get_client()
     voices_dir = project_dir / "voiceovers"
     voices_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = voice_output_path(scene, project_dir)
-    slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
-
     settings_dict = dict(config.ELEVEN_VOICE_SETTINGS)
+    narration_speed = max(
+        0.25, min(1.0, float(speed if speed is not None else config.DEFAULT_VOICE_SPEED))
+    )
+    settings_dict["speed"] = narration_speed
     voice_settings = VoiceSettings(**settings_dict)
+    chunks = chunk_script(text, config.VOICE_MAX_CHARS)
+    total = len(chunks)
+    logger.info("Voice-over: %s chunk(s), %s chars total.", total, len(text))
 
-    started = time.monotonic()
-    last_exc: Exception | None = None
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            audio = client.text_to_speech.convert(
-                voice_id=config.ELEVEN_VOICE_ID,
-                model_id=config.ELEVEN_MODEL_ID,
-                text=text,
-                output_format=config.ELEVEN_OUTPUT_FORMAT,
-                voice_settings=voice_settings,
-            )
-            with open(out_path, "wb") as fh:
-                for chunk in audio:
-                    if chunk:
-                        fh.write(chunk)
-            elapsed = time.monotonic() - started
-            logger.info(
-                "Voice slot %03d saved → %s  (%.1fs, voice=%s)",
-                slot,
-                out_path.name,
-                elapsed,
-                config.ELEVEN_VOICE_ID,
-            )
-            return out_path, elapsed
-        except Exception as exc:
-            last_exc = exc
-            logger.warning(
-                "Voice attempt %s/%s for slot %s failed: %s",
-                attempt + 1,
-                config.MAX_RETRIES,
-                slot,
-                exc,
-            )
-            if attempt < config.MAX_RETRIES - 1:
-                time.sleep(config.RETRY_DELAY * (attempt + 1))
-
-    raise RuntimeError(
-        f"Voice generation failed for slot {slot} after "
-        f"{config.MAX_RETRIES} attempts: {last_exc}"
-    )
-
-
-def generate_all_voiceovers(
-    scenes: list[dict],
-    project_dir: Path,
-    on_progress: Callable[[int, int, dict], None] | None = None,
-) -> tuple[list[dict], dict]:
-    """
-    Generate voice-overs for one row per unique slot (variants share).
-
-    Returns (updated_scenes, summary). `updated_scenes` is the same list with
-    voice_status / voice_seconds / voice_error filled in on every row.
-    """
-    slot_to_rows: dict[int, list[dict]] = {}
-    for s in scenes:
-        slot = int(s.get("slot_number") or s.get("scene_number") or 0)
-        slot_to_rows.setdefault(slot, []).append(s)
-
-    unique_slots = sorted(slot_to_rows.keys())
-    total = len(unique_slots)
-    if total == 0:
-        return scenes, {"total_slots": 0, "successful": 0, "failed": 0, "wall_clock_seconds": 0.0}
-
-    per_slot_time: dict[int, float] = {}
+    out_filename = "full_voiceover.wav"
+    out_path = voices_dir / out_filename
     started = time.monotonic()
 
-    workers = max(1, int(config.VOICE_WORKERS))
+    with tempfile.TemporaryDirectory(prefix="tatterveil_vo_") as tmp:
+        tmp_path = Path(tmp)
+        chunk_paths: list[Path] = []
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_slot = {}
-        for slot in unique_slots:
-            # Use the first row for that slot as the template (script_segment is identical).
-            template = slot_to_rows[slot][0]
-            future_to_slot[pool.submit(generate_voice, template, project_dir)] = slot
+        for i, chunk_text in enumerate(chunks):
+            prev_ctx = chunks[i - 1][-_CONTEXT_CHARS:] if i > 0 else None
+            next_ctx = chunks[i + 1][:_CONTEXT_CHARS] if i + 1 < total else None
 
-        done = 0
-        for future in as_completed(future_to_slot):
-            slot = future_to_slot[future]
-            done += 1
-            rows = slot_to_rows[slot]
-            try:
-                out_path, elapsed = future.result()
-                rel = out_path.relative_to(project_dir).as_posix()
-                fn = out_path.name
-                for r in rows:
-                    r["voice_path"] = rel
-                    r["voice_filename"] = fn
-                    r["voice_status"] = "done"
-                    r["voice_seconds"] = round(elapsed, 2)
-                    r["voice_error"] = None
-                per_slot_time[slot] = elapsed
-            except Exception as exc:
-                for r in rows:
-                    r["voice_status"] = "error"
-                    r["voice_error"] = str(exc)
-                logger.error("Voice slot %s failed: %s", slot, exc)
+            last_exc: Exception | None = None
+            chunk_file = tmp_path / f"chunk_{i:03d}.wav"
+            for attempt in range(config.MAX_RETRIES):
+                try:
+                    audio = _convert_chunk(
+                        client, chunk_text, voice_settings, prev_ctx, next_ctx
+                    )
+                    with open(chunk_file, "wb") as fh:
+                        for piece in audio:
+                            if piece:
+                                fh.write(piece)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Voice chunk %s/%s attempt %s/%s failed: %s",
+                        i + 1, total, attempt + 1, config.MAX_RETRIES, exc,
+                    )
+                    if attempt < config.MAX_RETRIES - 1:
+                        time.sleep(config.RETRY_DELAY * (attempt + 1))
+            if last_exc is not None:
+                raise RuntimeError(
+                    f"Voice generation failed for chunk {i + 1}/{total} after "
+                    f"{config.MAX_RETRIES} attempts: {last_exc}"
+                )
 
+            chunk_paths.append(chunk_file)
             if on_progress:
-                on_progress(done, total, rows[0])
+                on_progress(i + 1, total)
 
-    wall = time.monotonic() - started
-    successful = len(per_slot_time)
-    failed = total - successful
-    avg_time = (sum(per_slot_time.values()) / successful) if successful else 0.0
+        _concat_wav_files(chunk_paths, out_path)
 
-    summary = {
-        "total_slots":         total,
-        "successful":          successful,
-        "failed":              failed,
-        "wall_clock_seconds":  round(wall, 2),
-        "avg_voice_seconds":   round(avg_time, 2),
-        "parallel_workers":    workers,
-        "voice_id":            config.ELEVEN_VOICE_ID,
-        "model_id":            config.ELEVEN_MODEL_ID,
-    }
-
+    duration = _wav_duration_seconds(out_path)
+    elapsed = time.monotonic() - started
     logger.info(
-        "Voice generation: %s/%s ok, %s failed | wall %.1fs | avg %.1fs/slot",
-        successful, total, failed, wall, avg_time,
+        "Voice-over complete → %s  (%.1fs wall, %.1fs audio, %s chunks)",
+        out_path.name, elapsed, duration, total,
     )
-    return scenes, summary
+
+    return {
+        "status": "done",
+        "path": out_path.relative_to(project_dir).as_posix(),
+        "filename": out_filename,
+        "duration_seconds": round(duration, 2),
+        "chunks": total,
+        "voice_id": config.ELEVEN_VOICE_ID,
+        "model_id": config.ELEVEN_MODEL_ID,
+        "output_format": config.ELEVEN_OUTPUT_FORMAT,
+        "speed": narration_speed,
+        "generated_at": time.time(),
+    }
