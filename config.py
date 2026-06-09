@@ -13,6 +13,17 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 TEXT_MODEL:  str = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")   # scene splitting + prompt generation
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL",       "gpt-image-2")    # image generation
 
+# ── Speech-to-text (sentence-level timing for logical scene splitting) ───────
+# Only `whisper-1` returns word/segment timestamps (timestamp_granularities),
+# which we need to align each script sentence to the real voice-over timeline.
+# gpt-4o-transcribe is more accurate on text but exposes no timestamps, and we
+# discard the transcript text anyway (the original script is the source of truth),
+# so whisper-1 is the right choice here.
+STT_MODEL: str = os.getenv("STT_MODEL", "whisper-1")
+# OpenAI caps a single transcription upload at 25 MB; we split the WAV into
+# time slices safely under this many bytes and stitch the timestamps back.
+STT_MAX_UPLOAD_BYTES: int = int(os.getenv("STT_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
+
 # ── ElevenLabs (voice-over per scene) ────────────────────────────────────────
 ELEVEN_API_KEY: str = os.getenv("ELEVEN_API_KEY", "")
 ELEVEN_VOICE_ID: str = os.getenv("ELEVEN_VOICE_ID", "VuLPiW02W0Qm8465ksBZ")
@@ -52,10 +63,11 @@ DEFAULT_QUALITY: str = "medium"
 
 # ── Narration pacing ──────────────────────────────────────────────────────────
 # PREVIEW ONLY. The real video duration now comes from the generated ElevenLabs
-# voice-over (we measure the audio length). This constant is only used for the
-# pre-generation estimate (live scene-count + cost preview). 150 wpm is a good
-# approximation for speed=1.0 narration.
-WORDS_PER_MINUTE: int = 150
+# voice-over (we measure the audio length). These constants only drive the
+# pre-generation estimate (live scene-count + cost preview).
+# At a normal speaking pace there are ~1200 characters of script per minute.
+CHARS_PER_MINUTE: int = int(os.getenv("CHARS_PER_MINUTE", "1200"))
+WORDS_PER_MINUTE: int = 150     # legacy fallback (kept for reference)
 MIN_DURATION: float   = 1.0     # minimum video duration in minutes
 FIRST_SEGMENT: int    = 5       # minutes before the scene-rate switches
 DEFAULT_VOICE_SPEED: float = 1.0   # ElevenLabs narration speed (0.25–1.0); locked per project at create time
@@ -82,6 +94,10 @@ IMAGE_COSTS: dict = {
 # Flat one-time overhead per project for the scene-splitting + prompt-generation
 # LLM call (covers text-model usage outside the image API itself).
 PROMPT_GENERATION_FLAT_COST: float = 1.00
+
+# Voice-over cost per minute of narration (ElevenLabs TTS + whisper-1 STT for the
+# sentence timeline). ~$0.18 + ~$0.006 per minute = ~$0.186/min.
+VOICE_COST_PER_MINUTE: float = float(os.getenv("VOICE_COST_PER_MINUTE", "0.186"))
 
 # ── Regeneration queue ───────────────────────────────────────────────────────
 # Max simultaneous regeneration *image* renders (matches the OpenAI image

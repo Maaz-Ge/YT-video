@@ -124,9 +124,9 @@
             </span>
             <span class="proj-setting-sub" id="proj-cost-sub">
               {% if cost_actual %}
-                Final · {{ cost_actual.total_scenes }} images × ${{ "%.4f"|format(cost_actual.per_image_usd) }} + ${{ "%.2f"|format(cost_actual.prompt_overhead_usd) }} prompt
+                Final · {{ cost_actual.total_scenes }} images × ${{ "%.4f"|format(cost_actual.per_image_usd) }} + ${{ "%.2f"|format(cost_actual.prompt_overhead_usd) }} prompt + ${{ "%.2f"|format(cost_actual.voice_cost_usd or 0) }} voice
               {% elif cost_estimate %}
-                Estimate · {{ cost_estimate.total_scenes }} images × ${{ "%.4f"|format(cost_estimate.per_image_usd) }} + ${{ "%.2f"|format(cost_estimate.prompt_overhead_usd) }} prompt
+                Estimate · {{ cost_estimate.total_scenes }} images × ${{ "%.4f"|format(cost_estimate.per_image_usd) }} + ${{ "%.2f"|format(cost_estimate.prompt_overhead_usd) }} prompt + ${{ "%.2f"|format(cost_estimate.voice_cost_usd or 0) }} voice
               {% else %}awaiting plan{% endif %}
             </span>
           </div>

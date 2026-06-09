@@ -39,12 +39,14 @@ def _get_client() -> OpenAI:
 def estimate_duration(script: str, voice_speed: float = 1.0) -> float:
     """Return estimated video duration in minutes (preview only).
 
-    Real duration comes from the generated voice-over. Slower narration speed
-    (lower ElevenLabs speed value) produces longer audio, so the estimate
-    scales inversely with ``voice_speed``.
+    Estimated from character count (~CHARS_PER_MINUTE characters per minute at a
+    normal speaking pace), which tracks narration length more closely than word
+    count. Real duration still comes from the generated voice-over. Slower
+    narration speed (lower ElevenLabs speed value) produces longer audio, so the
+    estimate scales inversely with ``voice_speed``.
     """
-    words = len(script.split())
-    raw = words / config.WORDS_PER_MINUTE
+    chars = len(script or "")
+    raw = chars / config.CHARS_PER_MINUTE
     speed = max(0.25, min(1.0, float(voice_speed or 1.0)))
     raw = raw / speed
     return max(raw, config.MIN_DURATION)
@@ -213,29 +215,298 @@ def compute_equal_segments(script: str, scene_plan: dict) -> list[dict]:
     return segments
 
 
+# ─── 3b. Sentence-aligned logical scene grouping (per-minute scene budget) ────
+
+SCENE_GROUPING_SYSTEM = """\
+You are a documentary video editor. A narrated script has been transcribed and split \
+into numbered SENTENCES, each with the exact start/end time (seconds) measured from the \
+real voice-over. The sentences are organised into one-MINUTE buckets, and every minute \
+has a required number of scenes (target_scenes).
+
+Your job: within EACH minute, group that minute's consecutive sentences into EXACTLY \
+target_scenes scenes. One image will represent each scene.
+
+HARD RULES (never break):
+1. NEVER split a sentence — each sentence belongs to exactly one scene.
+2. NEVER put sentences from different minutes into the same scene.
+3. For each minute, output EXACTLY target_scenes scenes that use ALL of that minute's \
+   sentences, in order, with no gaps or overlaps.
+4. Keep related sentences together (group by meaning) while making the scenes within a \
+   minute as balanced in spoken length as you reasonably can.
+5. If a minute's target_scenes equals its sentence count, every sentence becomes its \
+   own scene.
+
+OUTPUT — JSON only, no prose:
+{
+  "scenes": [
+    { "scene_number": 1, "minute": 0, "sentence_indices": [1, 2] },
+    { "scene_number": 2, "minute": 0, "sentence_indices": [3, 4] }
+  ]
+}
+List scenes in time order. Every sentence index must appear exactly once.
+"""
+
+
+def _minute_index(sentence: dict) -> int:
+    """Which one-minute bucket a sentence belongs to, by its midpoint time.
+
+    Using the midpoint gives a natural tolerance at every minute boundary: a
+    sentence that mostly plays before the boundary stays in the earlier minute,
+    one that mostly plays after it moves to the next minute.
+    """
+    start = float(sentence.get("start_time", 0.0))
+    end = float(sentence.get("end_time", start))
+    return int(((start + end) / 2.0) // 60)
+
+
+def _partition_by_time(sentences: list[dict], k: int) -> list[list[dict]]:
+    """Split consecutive sentences into k time-balanced groups (no sentence cut)."""
+    n = len(sentences)
+    if n == 0 or k <= 0:
+        return []
+    k = min(k, n)
+    if k == 1:
+        return [list(sentences)]
+    if k == n:
+        return [[s] for s in sentences]
+
+    cum = [0.0]
+    for s in sentences:
+        dur = float(s.get("duration") or 0.0)
+        if dur <= 0:
+            dur = max(0.0, float(s.get("end_time", 0)) - float(s.get("start_time", 0)))
+        cum.append(cum[-1] + dur)
+    total = cum[-1]
+
+    cuts: list[int] = []
+    if total > 0:
+        for i in range(1, k):
+            target = total * i / k
+            best_j, best_d = 1, abs(cum[1] - target)
+            for j in range(1, n):
+                d = abs(cum[j] - target)
+                if d < best_d:
+                    best_j, best_d = j, d
+            cuts.append(best_j)
+
+    cuts = sorted({c for c in cuts if 0 < c < n})
+    if len(cuts) != k - 1:
+        # Degenerate (e.g. zero-duration) — fall back to an even index split.
+        cuts = sorted({min(max(round(i * n / k), 1), n - 1) for i in range(1, k)})
+
+    groups: list[list[dict]] = []
+    prev = 0
+    for c in cuts:
+        groups.append(list(sentences[prev:c]))
+        prev = c
+    groups.append(list(sentences[prev:]))
+    return [g for g in groups if g]
+
+
+def _build_minute_plan(sentences: list[dict], scene_plan: dict) -> list[dict]:
+    """Bucket sentences per minute and assign each minute a target scene count.
+
+    target_scenes = the requested rate for that minute (first_rate for the first
+    FIRST_SEGMENT minutes, rest_rate afterwards), capped at the number of
+    sentences in the minute — we can never make more scenes than sentences
+    without splitting a sentence.
+    """
+    first_rate = max(1, int(scene_plan.get("first_rate", 1) or 1))
+    rest_rate = max(1, int(scene_plan.get("rest_rate", 1) or 1))
+
+    buckets: dict[int, list[dict]] = {}
+    for s in sentences:
+        buckets.setdefault(_minute_index(s), []).append(s)
+
+    plan: list[dict] = []
+    for minute in sorted(buckets):
+        bucket = buckets[minute]
+        rate = first_rate if minute < int(config.FIRST_SEGMENT) else rest_rate
+        target = max(1, min(rate, len(bucket)))
+        plan.append({"minute": minute, "sentences": bucket, "target": target})
+    return plan
+
+
+def _minute_groups_valid(groups: list[list[dict]] | None, entry: dict) -> bool:
+    """True when one minute's groups use all its sentences in exactly the target
+    number of scenes, in order, with no sentence split or reordering."""
+    if not groups or len(groups) != int(entry["target"]):
+        return False
+    expected = [int(s["sentence_index"]) for s in entry["sentences"]]
+    flat: list[int] = []
+    for g in groups:
+        if not g:
+            return False
+        flat.extend(int(s["sentence_index"]) for s in g)
+    return flat == expected
+
+
+def _llm_group_minutes(title: str, plan: list[dict]) -> dict[int, list[list[dict]]] | None:
+    """Ask the LLM to group each minute's sentences into its target scene count.
+
+    Returns {minute_index: [group, ...]} (each minute validated by the caller),
+    or None when the call fails outright.
+    """
+    by_index = {int(s["sentence_index"]): s for e in plan for s in e["sentences"]}
+    total_scenes = sum(int(e["target"]) for e in plan)
+    minutes_payload = [
+        {
+            "minute": e["minute"],
+            "target_scenes": int(e["target"]),
+            "sentences": [
+                {
+                    "sentence_index": int(s["sentence_index"]),
+                    "start_time": s["start_time"],
+                    "end_time": s["end_time"],
+                    "text": s["text"],
+                }
+                for s in e["sentences"]
+            ],
+        }
+        for e in plan
+    ]
+    user_msg = (
+        f"VIDEO TITLE: {title}\n"
+        f"MINUTES: {len(plan)} | TOTAL SCENES REQUIRED: {total_scenes}\n\n"
+        "Group each minute's sentences into exactly its target_scenes scenes, "
+        "following every hard rule. Return JSON only.\n\n"
+        f"MINUTES:\n{json.dumps(minutes_payload, ensure_ascii=False)}"
+    )
+
+    client = _get_client()
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=config.TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": SCENE_GROUPING_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content or "{}"
+            data = json.loads(re.sub(r"```(?:json)?\s*", "", raw).strip())
+            scene_rows = data.get("scenes") if isinstance(data, dict) else data
+            if not isinstance(scene_rows, list):
+                raise ValueError("missing 'scenes' array")
+
+            by_minute: dict[int, list[list[dict]]] = {}
+            for row in scene_rows:
+                idxs = row.get("sentence_indices") if isinstance(row, dict) else None
+                if not isinstance(idxs, list) or not idxs:
+                    continue
+                group = [by_index[int(i)] for i in idxs if int(i) in by_index]
+                if not group:
+                    continue
+                # A scene belongs to the minute of its first sentence; cross-minute
+                # scenes simply fail that minute's validation downstream.
+                by_minute.setdefault(_minute_index(group[0]), []).append(group)
+            return by_minute
+        except Exception as exc:
+            logger.warning("LLM minute-grouping attempt %s failed: %s", attempt + 1, exc)
+            if attempt < config.MAX_RETRIES - 1:
+                time.sleep(config.RETRY_DELAY * (attempt + 1))
+    return None
+
+
+def build_scene_segments_from_sentences(
+    title: str,
+    sentences: list[dict],
+    scene_plan: dict,
+) -> list[dict]:
+    """
+    Group whole sentences into scenes using the real voice-over timing, honouring
+    the requested per-minute scene rate.
+
+    • Sentences are bucketed into one-minute windows by their midpoint, so each
+      sentence lands in the minute it mostly plays in (natural boundary tolerance).
+    • Every minute is split into its target number of scenes (the selected rate,
+      capped at that minute's sentence count — we never split a sentence, so a
+      minute with fewer sentences than the rate simply yields fewer scenes).
+    • The LLM does the meaningful grouping; if a minute's result doesn't match the
+      required count exactly, that minute falls back to a deterministic
+      time-balanced split — guaranteeing the per-minute scene counts.
+    • Each scene's start/end comes directly from its sentences, so the timeline
+      matches the narration and the final scene ends exactly at the audio length.
+    """
+    sents = sorted(sentences, key=lambda s: int(s.get("sentence_index", 0)))
+    if not sents:
+        return []
+
+    plan = _build_minute_plan(sents, scene_plan)
+
+    try:
+        llm_by_minute = _llm_group_minutes(title, plan)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM minute grouping unavailable: %s", exc)
+        llm_by_minute = None
+
+    final_groups: list[list[dict]] = []
+    fallback_minutes: list[int] = []
+    for entry in plan:
+        groups = (llm_by_minute or {}).get(entry["minute"])
+        if _minute_groups_valid(groups, entry):
+            final_groups.extend(groups)  # type: ignore[arg-type]
+        else:
+            fallback_minutes.append(entry["minute"])
+            final_groups.extend(_partition_by_time(entry["sentences"], entry["target"]))
+
+    if fallback_minutes:
+        logger.info(
+            "Deterministic scene split used for %s/%s minute(s): %s",
+            len(fallback_minutes), len(plan), fallback_minutes,
+        )
+
+    segments: list[dict] = []
+    for num, group in enumerate(g for g in final_groups if g):
+        scene_no = num + 1
+        text = " ".join(s["text"].strip() for s in group).strip()
+        start_t = float(group[0]["start_time"])
+        end_t = float(group[-1]["end_time"])
+        segments.append(
+            {
+                "scene_number": scene_no,
+                "slot_number": scene_no,
+                "start_time": round(start_t, 2),
+                "end_time": round(end_t, 2),
+                "duration": round(end_t - start_t, 2),
+                "script_segment": text,
+                "word_count": sum(len(s["text"].split()) for s in group),
+                "sentence_indices": [int(s["sentence_index"]) for s in group],
+            }
+        )
+    return segments
+
+
 def split_and_prompt(
     title: str,
     script: str,
     scene_plan: dict,
+    pre_segments: list[dict] | None = None,
 ) -> list[dict]:
     """
     Two-stage scene build:
 
-    1. Deterministically split the script into equal-word segments using
-       compute_equal_segments() — guarantees equal scene length within each
-       segment of the timeline.
+    1. Use pre-built scene segments (sentence-aligned to the real voice-over via
+       build_scene_segments_from_sentences) when provided. Otherwise fall back to
+       the deterministic equal-word split (compute_equal_segments).
     2. Ask the LLM to enrich each pre-split scene with scene_type, time_period,
        abstraction info, and the image prompt — without re-splitting the script.
     """
-    scene_count = scene_plan["total_scenes"]
     duration_minutes = scene_plan["duration_minutes"]
     duration_seconds = scene_plan["duration_seconds"]
 
-    pre_segments = compute_equal_segments(script, scene_plan)
+    if pre_segments is None:
+        pre_segments = compute_equal_segments(script, scene_plan)
     if not pre_segments:
         raise RuntimeError(
             "Could not split script into scenes — empty script or invalid scene plan."
         )
+
+    # The locked segments are the real scene count (sentence grouping may differ
+    # slightly from the planned target), so the LLM is told the true number.
+    scene_count = len(pre_segments)
 
     # Compact list passed to the LLM: it must NOT change scene_number, timing or text.
     locked_payload = [
@@ -311,6 +582,8 @@ def split_and_prompt(
                 row["duration"]     = pre["duration"]
                 row["script_segment"] = pre["script_segment"]
                 row["word_count"]   = pre["word_count"]
+                if pre.get("sentence_indices") is not None:
+                    row["sentence_indices"] = pre["sentence_indices"]
                 merged.append(row)
             return merged
 

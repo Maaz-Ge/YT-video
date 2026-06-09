@@ -28,6 +28,7 @@ from flask import (
 import config
 from engine import pipeline, voice as voice_engine
 from engine import thumbnails
+from engine import transcribe as transcribe_engine
 from engine.scene_utils import (
     duplicate_slot_numbers,
     ensure_scene_entries,
@@ -177,19 +178,28 @@ def _per_image_cost(resolution: str | None, quality: str | None) -> float:
     return float(table.get(quality or "", 0.0) or 0.0)
 
 
-def _estimate_cost(resolution: str | None, quality: str | None, total_scenes: int) -> dict:
+def _estimate_cost(
+    resolution: str | None,
+    quality: str | None,
+    total_scenes: int,
+    duration_minutes: float = 0.0,
+) -> dict:
     per_image = _per_image_cost(resolution, quality)
     scenes = max(0, int(total_scenes or 0))
+    minutes = max(0.0, float(duration_minutes or 0.0))
     images_subtotal = round(per_image * scenes, 4)
     prompt_overhead = round(float(config.PROMPT_GENERATION_FLAT_COST), 4)
-    total = round(images_subtotal + prompt_overhead, 4)
+    voice_cost = round(float(config.VOICE_COST_PER_MINUTE) * minutes, 4)
+    total = round(images_subtotal + prompt_overhead + voice_cost, 4)
     return {
         "resolution": resolution,
         "quality": quality,
         "per_image_usd": round(per_image, 4),
         "total_scenes": scenes,
+        "duration_minutes": round(minutes, 2),
         "images_subtotal_usd": images_subtotal,
         "prompt_overhead_usd": prompt_overhead,
+        "voice_cost_usd": voice_cost,
         "total_usd": total,
     }
 
@@ -217,6 +227,7 @@ ACTIVE_GENERATION_STEPS = frozenset({
     "prompting_done",
     "generating",
     "voicing",
+    "transcribing",
 })
 
 
@@ -365,33 +376,92 @@ def _run_generation(project_id: str, meta: dict) -> None:
         meta["voiceover"] = voiceover_info
         timing_log["voice_seconds"] = round(time.monotonic() - voice_start, 2)
 
-        # ── Step 3: Compute scene plan from the actual duration ──────────────
+        # ── Step 3: Transcribe the voice-over → per-sentence timeline ─────────
+        # STT gives each sentence its real start/end time so scenes can be split
+        # on whole sentences that line up with the spoken narration. We keep the
+        # ORIGINAL script text (STT output is used only for timing).
+        sentence_timeline: dict | None = None
+        if voiceover_info.get("status") == "done" and config.OPENAI_API_KEY:
+            stt_start = time.monotonic()
+            _set_state(project_id, step="transcribing", progress=37,
+                       message="Transcribing voice-over to time each sentence…")
+            try:
+                wav_path = project_dir / str(voiceover_info["path"]).replace("\\", "/")
+                sentence_timeline = transcribe_engine.build_sentence_timeline(
+                    script=script, wav_path=wav_path,
+                )
+                (project_dir / "sentence_timeline.json").write_text(
+                    json.dumps(sentence_timeline, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                meta["sentence_timeline"] = {
+                    "source": "stt",
+                    "stt_model": sentence_timeline.get("stt_model"),
+                    "sentence_count": sentence_timeline.get("sentence_count"),
+                    "audio_duration_seconds": sentence_timeline.get("audio_duration_seconds"),
+                }
+                logger.info(
+                    "Sentence timeline ready: %s sentences.",
+                    sentence_timeline.get("sentence_count"),
+                )
+            except Exception as exc:
+                logger.error("Sentence timeline (STT) failed: %s", exc, exc_info=True)
+                sentence_timeline = None
+            timing_log["stt_seconds"] = round(time.monotonic() - stt_start, 2)
+
+        # ── Step 4: Compute scene plan from the actual duration ──────────────
         scene_plan = pipeline.compute_scene_plan(
             duration=duration,
             first_rate=meta["first_rate"],
             rest_rate=meta["rest_rate"],
         )
+
+        # ── Step 5: Build scene segments ─────────────────────────────────────
+        # Preferred: logical grouping of whole sentences (timestamps from STT).
+        # Fallback: the legacy equal-word split when STT is unavailable.
+        pre_segments = None
+        if sentence_timeline and sentence_timeline.get("sentences"):
+            try:
+                pre_segments = pipeline.build_scene_segments_from_sentences(
+                    title=meta["name"],
+                    sentences=sentence_timeline["sentences"],
+                    scene_plan=scene_plan,
+                )
+            except Exception as exc:
+                logger.error("Sentence-based grouping failed: %s", exc, exc_info=True)
+                pre_segments = None
+
+        # When grouping succeeded, the real scene count drives the plan + cost.
+        if pre_segments:
+            boundary = float(scene_plan.get("first_segment_minutes", 0) or 0) * 60.0
+            first_n = sum(1 for s in pre_segments if float(s["start_time"]) < boundary)
+            scene_plan["first_segment_scenes"] = first_n
+            scene_plan["rest_segment_scenes"] = len(pre_segments) - first_n
+            scene_plan["total_scenes"] = len(pre_segments)
+
         meta["scene_plan"] = scene_plan
         meta["cost_estimate"] = _estimate_cost(
             meta.get("resolution"),
             meta.get("quality"),
             scene_plan.get("total_scenes", 0),
+            scene_plan.get("duration_minutes", 0),
         )
         _meta_path(project_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        _set_state(project_id, step="voicing", progress=36,
+        _set_state(project_id, step="transcribing", progress=42,
                    message=f"Voice-over is ~{duration:.1f} min → "
                            f"{scene_plan['total_scenes']} scenes planned",
                    scene_plan=scene_plan)
 
-        # ── Step 4: Split script + generate prompts ──────────────────────────
+        # ── Step 6: Enrich each scene + generate prompts ─────────────────────
         step_start = time.monotonic()
-        _set_state(project_id, step="prompting", progress=38,
-                   message="Splitting script into scenes and generating visual prompts…")
+        _set_state(project_id, step="prompting", progress=44,
+                   message="Generating visual prompts for each scene…")
 
         scenes = pipeline.split_and_prompt(
             title=meta["name"],
             script=script,
             scene_plan=scene_plan,
+            pre_segments=pre_segments,
         )
         scenes = ensure_scene_entries(scenes)
 
@@ -439,6 +509,7 @@ def _run_generation(project_id: str, meta: dict) -> None:
             meta.get("resolution"),
             meta.get("quality"),
             successful,
+            scene_plan.get("duration_minutes", 0),
         )
         _meta_path(project_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -1125,7 +1196,9 @@ def api_estimate():
 
     duration = pipeline.estimate_duration(script, voice_speed) if script.strip() else 0.0
     plan = pipeline.compute_scene_plan(duration, first_rate, rest_rate)
-    cost = _estimate_cost(resolution, quality, plan.get("total_scenes", 0))
+    cost = _estimate_cost(
+        resolution, quality, plan.get("total_scenes", 0), plan.get("duration_minutes", 0)
+    )
     return jsonify({**plan, "cost": cost, "voice_speed": voice_speed})
 
 

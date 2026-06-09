@@ -206,6 +206,7 @@ function initEstimatePanel() {
     const quality   = getSelectedQuality();
     const voiceSpeed = getVoiceSpeed();
     const words     = script.split(/\s+/).filter(Boolean).length;
+    const chars     = script.length;
 
     const anaWords    = document.getElementById("ana-words");
     const anaDuration = document.getElementById("ana-duration");
@@ -260,7 +261,7 @@ function initEstimatePanel() {
       if (estTotal) estTotal.textContent = data.total_scenes;
       if (calcText) {
         calcText.textContent =
-          `${words.toLocaleString()} words at speed ${voiceSpeed} → ~${data.duration_minutes.toFixed(1)} min preview (final length from narration)`;
+          `${chars.toLocaleString()} characters (~1200/min) at speed ${voiceSpeed} → ~${data.duration_minutes.toFixed(1)} min preview (final length from narration)`;
       }
 
       const c = data.cost || {};
@@ -268,10 +269,12 @@ function initEstimatePanel() {
       const costPerEl   = document.getElementById("est-cost-per-image");
       const costScenesEl= document.getElementById("est-cost-scenes");
       const costPromptEl= document.getElementById("est-cost-prompt");
+      const costVoiceEl = document.getElementById("est-cost-voice");
       if (costTotalEl) costTotalEl.textContent = formatUSD(c.total_usd);
       if (costPerEl)   costPerEl.textContent   = formatUSD(c.per_image_usd);
       if (costScenesEl)costScenesEl.textContent= c.total_scenes != null ? c.total_scenes : "—";
       if (costPromptEl)costPromptEl.textContent= (c.prompt_overhead_usd != null ? c.prompt_overhead_usd.toFixed(2) : "1.00");
+      if (costVoiceEl) costVoiceEl.textContent = (c.voice_cost_usd != null ? c.voice_cost_usd.toFixed(2) : "—");
     } catch (e) { /* silent */ }
   }
 
