@@ -35,8 +35,8 @@ ELEVEN_OUTPUT_FORMAT: str = os.getenv("ELEVEN_OUTPUT_FORMAT", "wav_44100")
 # speed=1.0 is the natural pace; keep the rest fixed so every chunk of the
 # combined voice-over sounds identical.
 ELEVEN_VOICE_SETTINGS: dict = {
-    "stability":        float(os.getenv("ELEVEN_STABILITY",        "0.26")),
-    "similarity_boost": float(os.getenv("ELEVEN_SIMILARITY_BOOST", "0.33")),
+    "stability":        float(os.getenv("ELEVEN_STABILITY",        "0.75")),
+    "similarity_boost": float(os.getenv("ELEVEN_SIMILARITY_BOOST", "0.85")),
     "style":            float(os.getenv("ELEVEN_STYLE",            "0.07")),
     "use_speaker_boost": True,
     "speed":            float(os.getenv("ELEVEN_SPEED",            "1.0")),

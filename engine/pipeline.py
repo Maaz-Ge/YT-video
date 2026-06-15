@@ -532,8 +532,9 @@ def split_and_prompt(
         f"SCENE COUNT: {scene_count}\n\n"
         "IMPORTANT: The script has already been split into equally-sized scenes. "
         "Do NOT change scene_number, start_time, end_time, duration, or script_segment. "
-        "Return them verbatim. Your job is to add the documentary classification and "
-        "Tatterveil image prompt for each scene.\n\n"
+        "Return them verbatim. Your job is to add the documentary classification, "
+        "shot rhythm (is_vista_shot, shot_scale per Step 3.5), human figure policy, "
+        "and Tatterveil image prompt for each scene.\n\n"
         f"LOCKED SCENES (use exactly these segments and timings):\n"
         f"{json.dumps(locked_payload, ensure_ascii=False)}\n\n"
         f"FULL SCRIPT (context only — for tone / continuity):\n{script.strip()}"
@@ -786,7 +787,9 @@ Return a JSON object with keys:
   "negative_prompt": string or null — revised negative constraints; if minor change only, reuse and lightly adjust the previous negatives; use null only if no negatives are needed.
 
 Rules:
-- Preserve period, scene type, and composition intent from the original unless the user explicitly asks to change them.
+- Preserve period, scene type, shot_scale, and is_vista_shot intent from the original unless the user explicitly asks to change them.
+- Vista/establishing shots: high vantage, atmospheric perspective, depth layers, specific weather and time of day — never generic flat postcard wides.
+- Humans: include period-accurate figures when the script calls for people; faces never readable (backs turned, shadow, distance, silhouette only).
 - Keep 16:9 landscape, photorealistic documentary language, no watermarks, no text in image.
 - Apply the user's new instructions faithfully while staying stylistically consistent.
 """

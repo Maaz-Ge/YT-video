@@ -1,5 +1,5 @@
 """
-ThomCreates — Tatterveil Style Guide v2.0
+ThomCreates — Tatterveil Style Guide v2.1
 Developer reference: style constants + the LLM system prompt for scene splitting
 and image-prompt generation.
 """
@@ -72,7 +72,8 @@ Script signal → Visual era to apply:
 • Specific year/century ("1901", "1347 CE", "19th century") → period-accurate \
   setting with era-specific lighting, materials, clothing, equipment
 • "ancient" / "BCE" / "BC" / "X years ago" / "millennium" / "millennia" → full \
-  ancient world treatment; no humans; pure artifact and environment focus
+  ancient world treatment; default to artifact and environment focus (human \
+  figures only when the script explicitly involves people — see Human Figure Policy)
 • "Ice Age" / "34,000 years ago" / "Pleistocene" / "prehistoric" → frozen tundra; \
   cold blue-grey palette; sparse barren landscape
 • "underwater" / "submerged" / "shipwreck" / "ocean floor" / "seabed" → murky \
@@ -302,9 +303,10 @@ TYPE 1 — ARTIFACT CLOSE-UP
   resting on [surface: dark damp earth/ancient stone shelf/sandy seabed floor], \
   [light: single candle from left / diffused grey window light / murky underwater \
   column light], surrounding darkness pressing in at all edges, extreme surface \
-  texture detail, no humans, ambient diffused light only no studio lighting, \
-  atmospheric photorealistic, documentary photography style, 16:9 landscape, \
-  deep shadow, crushed blacks, cool desaturated colour grade
+  texture detail, no humans unless script calls for people (see Human Figure Policy), \
+  ambient diffused light only no studio lighting, atmospheric photorealistic, \
+  documentary photography style, 16:9 landscape, deep shadow, crushed blacks, \
+  cool desaturated colour grade
 
 TYPE 2 — ENVIRONMENTAL WIDE SHOT
   Use when: script describes a location (temple, burial site, landscape, seabed)
@@ -316,9 +318,28 @@ TYPE 2 — ENVIRONMENTAL WIDE SHOT
   frost-cracked/partially submerged in sediment], [region-specific element: dense \
   jungle canopy / desert sand dunes / ice field / dark water], deep atmospheric haze \
   layered far into distance, low horizon line, natural framing via [tree canopy / \
-  stone archway / cave opening / submerged pillars], rule of thirds, no humans, \
+  stone archway / cave opening / submerged pillars], rule of thirds, no humans \
+  unless script calls for people or scale figures (see Human Figure Policy), \
   atmospheric photorealistic, documentary photography style, 16:9 landscape, \
   deep shadow at all frame edges, cool desaturated colour grade
+
+  VISTA / ESTABLISHING CRAFT — when is_vista_shot = true (see Step 3.5):
+  A vista is NOT a default wallpaper shot — it is a rhythmic rhetorical pull-back \
+  that makes the viewer feel small so the human story feels larger. Apply ALL of:
+  • High vantage point — looking down or out across the landscape; never flat \
+    eye-level postcard composition
+  • Atmospheric perspective — distant elements faded with haze/mist; foreground \
+    sharper than background
+  • Multiple depth layers — foreground trees/stones/ruins, midground city/temple/ \
+    ruin, background mountains/skyline
+  • Soft directional light — golden hour, overcast diffusion, or low sun raking \
+    across the scene (always specify weather + time of day even if script does not)
+  • Focal point in the middle distance — the eye must land somewhere specific
+  • Optional tiny human figures for scale — distant silhouettes only; never the \
+    subject of the frame
+  • NEVER produce a generic flat "wide painting of an ancient city" — every vista \
+    needs a specific weather, a specific time of day, and a specific compositional \
+    triangle (foreground anchor + midground subject + background atmosphere)
 
 TYPE 3 — DISCOVERY SCENE
   Use when: script describes something being found, excavated, pulled from water, revealed
@@ -330,7 +351,9 @@ TYPE 3 — DISCOVERY SCENE
   Mediterranean seabed / 1901-era excavation site], warm [torchlight / oil lantern / \
   pre-dawn diffused grey] from [direction: left / above / off-frame right], original \
   material still clinging to surfaces, deep shadow surroundings with subject as sole \
-  focal point, no visible human faces or hands, atmospheric photorealistic, 16:9 landscape
+  focal point, no visible human faces or hands unless script requires human presence \
+  (see Human Figure Policy — discovery act still shown via the object, not divers), \
+  atmospheric photorealistic, 16:9 landscape
 
 TYPE 4 — ABSTRACT / CONCEPTUAL
   Use when: script describes an idea, mystery, vanishing, loss, time, or any \
@@ -362,9 +385,9 @@ TYPE 4 — ABSTRACT / CONCEPTUAL
   torch / dawn grey], crushed blacks pressing in at all frame edges, atmospheric \
   mist or haze present throughout, heavy aged texture on remaining surfaces, \
   no humans [or single tiny silhouette back turned face not visible for scale \
-  only], cool desaturated colour grade, 16:9 landscape, documentary photography \
-  style, mood: [contemplative / haunting / mournful / quiet / unresolved / vast \
-  and unknowable]
+  only — see Human Figure Policy if script involves people], cool desaturated \
+  colour grade, 16:9 landscape, documentary photography style, mood: \
+  [contemplative / haunting / mournful / quiet / unresolved / vast and unknowable]
 
 TYPE 5 — PERIOD CONTEXT
   Use when: script explicitly places human activity in a known historical era
@@ -372,9 +395,58 @@ TYPE 5 — PERIOD CONTEXT
   Prompt structure: [Full period-accurate environment description] from [exact time \
   period], [era-appropriate light: gas lamp / oil lantern / candle sconce / overcast \
   daylight], [era-accurate materials and surfaces described in detail], atmospheric \
-  and cinematic, focus on environment and objects rather than human figures, any \
-  humans: backs turned or faces in deep shadow, period costume accurate to [era], \
-  no modern anachronisms, atmospheric photorealistic, 16:9 landscape
+  and cinematic, focus on environment and objects rather than human figures unless \
+  script centers on human activity (see Human Figure Policy), any humans: backs \
+  turned or faces in deep shadow or distant silhouettes, period costume accurate \
+  to [era], no modern anachronisms, atmospheric photorealistic, 16:9 landscape
+
+════════════════════════════════════════════════════════════════
+  STEP 3.5 — VISTA / ESTABLISHING SHOT RHYTHM  (do this for EVERY scene)
+════════════════════════════════════════════════════════════════
+
+Treat the establishing/vista shot as a rhythmic visual tool, NOT a default.
+The power of these shots comes from CONTRAST — they only "wow" the viewer
+because they sit between closer, more intimate shots. If everything is wide,
+nothing is wide.
+
+For each scene, set is_vista_shot = true ONLY when the script beat AND the
+pacing rhythm both justify a pull-back. Set shot_scale accordingly:
+  • "extreme_close" — artifact surface, inscription detail, single object
+  • "close" — intimate object or claustrophobic interior beat
+  • "mid" — discovery partial reveal, corridor, chamber, medium environment
+  • "wide_vista" — establishing vista (is_vista_shot must also be true)
+
+WHEN TO GENERATE A WIDE VISTA SHOT (is_vista_shot = true, shot_scale = wide_vista):
+• MANDATORY: Opening scene of a new chapter or section — relocate the viewer \
+  in space and time with a full establishing vista (first scene after any clear \
+  topical break, new location intro, or "Part II" / chapter heading in script)
+• First mention of a new place — e.g. "In the hills of southern Italy..." → vista
+• Moments of scale or grandeur — "the city housed sixty thousand people", \
+  "stretched for over a mile", "the empire spanned three continents"
+• Time passing or epochal beats — "for a thousand years, this was the heart \
+  of the world"
+• Emotional pull-backs — after an intense intimate moment, ONE vista lets the \
+  viewer breathe and reflect (never two vistas back-to-back)
+
+WHEN NOT TO GENERATE A WIDE VISTA SHOT (is_vista_shot = false):
+• Script describes a specific object, person, or detail → close or mid shot
+• Emotional beat is intimate or claustrophobic → close or mid shot
+• The previous scene was already a vista → this scene MUST be closer (intercut)
+• abstraction_mode = true → symbolic intimacy, NOT scale (never vista)
+• Discovery moments → show the artifact emerging, not a postcard landscape
+
+PACING RULE (encode across the full scene list):
+• Roughly ONE vista shot per 60–90 seconds of narration — never more
+• At typical scene rates that means one establishing vista every 3–5 scenes, \
+  NOT every scene
+• Between every vista: intercut close-ups, mid-shots, and atmospheric details
+• Scene 1 of the video should almost always open with a vista establishing shot
+• Scene 1 of each new chapter/section MUST be a vista establishing shot
+
+STORYTELLING LOGIC:
+A vista shot is a rhetorical move — the camera pulling back to remind us how \
+big this was. It is NOT wallpaper between paragraphs. In scene_type_reasoning, \
+when is_vista_shot = true, state WHY this moment earns a pull-back.
 
 ════════════════════════════════════════════════════════════════
   STEP 4 — TATTERVEIL STYLE LOCKS  (apply to EVERY prompt without exception)
@@ -399,6 +471,43 @@ NEVER INCLUDE IN ANY PROMPT:
 ✗ Visible modern materials (plastic, chrome, digital screens, wires)
 ✗ Perfect symmetry — describe asymmetry explicitly
 ✗ Clean undamaged surfaces on ancient objects — describe wear, cracks, erosion
+
+════════════════════════════════════════════════════════════════
+  STEP 4.5 — HUMAN FIGURE POLICY  (apply when script involves people)
+════════════════════════════════════════════════════════════════
+
+Default remains artifact-and-environment-first documentary photography.
+HOWEVER — include period-accurate human figures when the SCRIPT calls for them:
+worshippers in a temple, soldiers on a wall, workers in a quarry, mourners at a \
+funeral, inhabitants in a street, a procession, a crowd, named historical figures \
+as distant presence, etc.
+
+WHEN HUMANS APPEAR — face and identity rules (non-negotiable):
+• Faces must NEVER be the focal point or readable in detail
+• Acceptable: backs turned, faces in deep shadow, silhouettes, figures seen from \
+  far distance, figures too small to read facial features, hooded or veiled, \
+  profile lost in haze, motion blur at edge of frame
+• A few humans in frame is fine — they are atmosphere and scale, not portraits
+• Period-accurate costume and posture only; no modern anachronisms
+• Never stage a posed group portrait or hero close-up of a face
+
+WHEN HUMANS MUST NOT APPEAR (even if script mentions people):
+• Discovery scenes — show the artifact/location found, NOT divers/excavators \
+  (CRITICAL DISCOVERY RULE from Step 1 still applies)
+• abstraction_mode = true — prefer absence; at most one tiny back-turned \
+  silhouette for scale in rare cases
+• Artifact close-ups — environment only unless a human hand would break the \
+  composition (default: no humans in Type 1)
+
+WHEN SCRIPT CENTERS HUMAN ACTIVITY (markets, battles, rituals, daily life):
+• Use Type 5 Period Context or a mid-shot with multiple small figures
+• Describe humans as "distant period-accurate figures", "silhouetted worshippers", \
+  "tiny workers on the quarry face" — never as identifiable individuals
+• Primary subject can shift toward the human *activity* (the crowd, the procession) \
+  while individual faces remain unreadable
+
+In every prompt that includes humans, explicitly state how faces are concealed \
+(e.g. "backs turned", "faces lost in shadow", "figures too distant to discern features").
 
 ════════════════════════════════════════════════════════════════
   STEP 5 — NEGATIVE PROMPT CONSTRUCTION
@@ -435,6 +544,13 @@ SCENE-TYPE ADDITIONS (add to universal for that type):
 8. When a discovery is described, show the thing found, not the act of finding it
 9. Minimum 90 words per prompt — target 110–150 words for full atmospheric richness
 10. Every prompt must contain "atmospheric photorealistic" and "16:9 landscape"
+11. Vista shots are rhythmic, not default — roughly one per 60–90 seconds; never \
+    two wide vistas back-to-back; chapter/section openings MUST open with a vista
+12. When humans appear, faces are never readable — backs turned, shadow, distance, \
+    or silhouette only; include humans when the script calls for people
+13. Never produce a generic flat postcard wide shot — every vista needs specific \
+    weather, time of day, and compositional depth layers (Step 3.5 craft rules)
+14. abstraction_mode scenes are never vista shots — keep symbolic intimacy
 
 ════════════════════════════════════════════════════════════════
   OUTPUT FORMAT — JSON only, no markdown, no text outside JSON
@@ -458,7 +574,9 @@ Return a single JSON object. Key "scenes" contains an array of exactly \
       "abstraction_concept": "<core concept extracted from the script when abstraction_mode is true (e.g. 'vanishing', 'time passing', 'lost knowledge'), else null>",
       "absence_technique": "<one of: empty_vessel | half_reclaimed | fading_subject | aftermath_frame | threshold_to_darkness | negative_space | erasure — only when abstraction_mode is true, else null>",
       "time_period_reasoning": "<one sentence: what in the script signalled this era>",
-      "scene_type_reasoning": "<one sentence: why this scene type was selected — for Type 4 explicitly state which Absence Technique is used and why>",
+      "scene_type_reasoning": "<one sentence: why this scene type was selected — for Type 4 explicitly state which Absence Technique is used and why; if is_vista_shot is true, state why this moment earns a pull-back>",
+      "is_vista_shot": <true | false — true only for establishing vista pull-backs per Step 3.5>,
+      "shot_scale": "<extreme_close | close | mid | wide_vista>",
       "prompt": "<complete image generation prompt — minimum 90 words — all style locks applied>",
       "negative_prompt": "<universal negatives + type-specific additions, comma-separated>"
     }}
