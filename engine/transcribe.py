@@ -465,7 +465,7 @@ def align_sentences(
             preview = " ".join(sentences[i].split()[:8])
             raise STTAlignmentError(
                 f"Could not align sentence {i + 1} ({len(sent_tokens)} words) "
-                f'to the voice-over: "{preview}…". {STT_USER_MESSAGE}"
+                f'to the voice-over: "{preview}...". {STT_USER_MESSAGE}'
             )
         matches.append((first_idx, last_idx))
 
