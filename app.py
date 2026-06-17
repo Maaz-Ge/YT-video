@@ -29,6 +29,7 @@ import config
 from engine import pipeline, voice as voice_engine
 from engine import thumbnails
 from engine import transcribe as transcribe_engine
+from engine.transcribe import STTError, STT_USER_MESSAGE
 from engine.pipeline import ContentModerationError, MODERATION_USER_MESSAGE, is_moderation_error
 from engine.scene_utils import (
     duplicate_slot_numbers,
@@ -392,41 +393,36 @@ def _run_generation(project_id: str, meta: dict) -> None:
         # STT gives each sentence its real start/end time so scenes can be split
         # on whole sentences that line up with the spoken narration. We keep the
         # ORIGINAL script text (STT output is used only for timing).
+        # When voice-over was generated, STT is mandatory — no estimated fallback.
         sentence_timeline: dict | None = None
-        if voiceover_info.get("status") == "done":
+        voice_ready = voiceover_info.get("status") == "done"
+        if voice_ready:
             if not config.OPENAI_API_KEY:
-                raise RuntimeError(
-                    "OPENAI_API_KEY is required to transcribe the voice-over and "
-                    "build accurate per-sentence scene timestamps."
+                raise STTError(
+                    "OpenAI API key is required for speech-to-text timing. "
+                    + STT_USER_MESSAGE
                 )
             stt_start = time.monotonic()
             _set_state(project_id, step="transcribing", progress=37,
                        message="Transcribing voice-over to time each sentence…")
-            try:
-                wav_path = project_dir / str(voiceover_info["path"]).replace("\\", "/")
-                sentence_timeline = transcribe_engine.build_sentence_timeline(
-                    script=script, wav_path=wav_path,
-                )
-                (project_dir / "sentence_timeline.json").write_text(
-                    json.dumps(sentence_timeline, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                meta["sentence_timeline"] = {
-                    "source": "stt",
-                    "stt_model": sentence_timeline.get("stt_model"),
-                    "sentence_count": sentence_timeline.get("sentence_count"),
-                    "audio_duration_seconds": sentence_timeline.get("audio_duration_seconds"),
-                }
-                logger.info(
-                    "Sentence timeline ready: %s sentences.",
-                    sentence_timeline.get("sentence_count"),
-                )
-            except Exception as exc:
-                logger.error("Sentence timeline (STT) failed: %s", exc, exc_info=True)
-                raise RuntimeError(
-                    "Could not build sentence timeline from the voice-over. "
-                    "Accurate scene timing requires successful STT."
-                ) from exc
+            wav_path = project_dir / str(voiceover_info["path"]).replace("\\", "/")
+            sentence_timeline = transcribe_engine.build_sentence_timeline(
+                script=script, wav_path=wav_path,
+            )
+            (project_dir / "sentence_timeline.json").write_text(
+                json.dumps(sentence_timeline, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            meta["sentence_timeline"] = {
+                "source": "stt",
+                "stt_model": sentence_timeline.get("stt_model"),
+                "sentence_count": sentence_timeline.get("sentence_count"),
+                "audio_duration_seconds": sentence_timeline.get("audio_duration_seconds"),
+            }
+            logger.info(
+                "Sentence timeline ready: %s sentences.",
+                sentence_timeline.get("sentence_count"),
+            )
             timing_log["stt_seconds"] = round(time.monotonic() - stt_start, 2)
 
         # ── Step 4: Compute scene plan from the actual duration ──────────────
@@ -437,29 +433,19 @@ def _run_generation(project_id: str, meta: dict) -> None:
         )
 
         # ── Step 5: Build scene segments ─────────────────────────────────────
-        # Preferred: logical grouping of whole sentences (timestamps from STT).
-        # Fallback: equal-word split only when voice-over was not generated.
+        # With voice-over: sentence timestamps from STT are required.
+        # Without voice-over: equal-word split is used later in split_and_prompt.
         pre_segments = None
         if sentence_timeline and sentence_timeline.get("sentences"):
-            audio_dur = float(
-                sentence_timeline.get("audio_duration_seconds")
-                or voiceover_info.get("duration_seconds")
-                or scene_plan.get("duration_seconds")
-                or 0
-            )
             pre_segments = pipeline.build_scene_segments_from_sentences(
                 title=meta["name"],
                 sentences=sentence_timeline["sentences"],
                 scene_plan=scene_plan,
-                audio_duration=audio_dur,
             )
-            planned = int(scene_plan.get("total_scenes") or 0)
-            actual = len(pre_segments)
-            if planned and abs(actual - planned) > max(3, int(planned * 0.1)):
-                logger.warning(
-                    "Scene count from sentence split (%s) differs from duration "
-                    "estimate (%s) — using measured voice timeline.",
-                    actual, planned,
+            if voice_ready and not pre_segments:
+                raise STTError(
+                    "Could not build scenes from the sentence timeline. "
+                    + STT_USER_MESSAGE
                 )
 
         # When grouping succeeded, the real scene count drives the plan + cost.
@@ -494,6 +480,7 @@ def _run_generation(project_id: str, meta: dict) -> None:
             scene_plan=scene_plan,
             pre_segments=pre_segments,
             abstraction_enabled=bool(meta.get("abstraction_enabled", config.DEFAULT_ABSTRACTION_ENABLED)),
+            require_stt_segments=voice_ready,
         )
         scenes = ensure_scene_entries(scenes)
 
@@ -527,7 +514,6 @@ def _run_generation(project_id: str, meta: dict) -> None:
             resolution=meta.get("resolution", config.DEFAULT_RESOLUTION),
             project_dir=project_dir,
             on_progress=on_progress,
-            auto_rephrase_on_moderation=True,
         )
 
         timing_log["image_seconds"] = round(time.monotonic() - step_start, 2)
@@ -580,6 +566,15 @@ def _run_generation(project_id: str, meta: dict) -> None:
         )
         logger.info(f"Project {project_id} completed — {total} scenes.")
 
+    except STTError as exc:
+        logger.error("Project %s STT failed: %s", project_id, exc, exc_info=True)
+        _set_state(
+            project_id,
+            step="error",
+            progress=0,
+            error_kind="stt",
+            message=str(exc) or STT_USER_MESSAGE,
+        )
     except ContentModerationError as exc:
         logger.error("Project %s blocked by safety system: %s", project_id, exc)
         _set_state(
