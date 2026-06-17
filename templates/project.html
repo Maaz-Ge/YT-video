@@ -97,6 +97,10 @@
             <span class="proj-setting-label">Scenes/min — remaining</span>
             <span class="proj-setting-value">{{ project.rest_rate }}</span>
           </div>
+          <div class="proj-setting">
+            <span class="proj-setting-label">Abstract visuals</span>
+            <span class="proj-setting-value">{{ 'On' if project.get('abstraction_enabled', False) else 'Off' }}</span>
+          </div>
           {% if project.scene_plan %}
           <div class="proj-setting">
             <span class="proj-setting-label">Total scenes</span>
@@ -461,8 +465,8 @@
             </div>
 
             <div class="scene-card-actions">
-              <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="{{ s.entry_id }}" {% if s.image_status != 'done' %}disabled{% endif %}>Regenerate</button>
-              <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}">Delete variant</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="{{ s.entry_id }}" {% if s.image_status == 'pending' %}disabled{% endif %}>Regenerate</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}" {% if not slot_dup %}disabled title="A scene must keep at least one image. Regenerate an alternative first."{% endif %}>Delete variant</button>
             </div>
 
             <details class="scene-prompt-details">
@@ -522,7 +526,8 @@
       <span id="export-modal-count"></span>
     </div>
     <div class="modal-actions">
-      <button type="button" class="btn btn-ghost btn-sm" id="export-modal-close">Close</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="export-modal-close" hidden>Close</button>
+      <p class="export-modal-note" id="export-modal-note">Please wait — do not close this window until the download finishes.</p>
     </div>
   </div>
 </div>

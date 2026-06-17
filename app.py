@@ -29,6 +29,7 @@ import config
 from engine import pipeline, voice as voice_engine
 from engine import thumbnails
 from engine import transcribe as transcribe_engine
+from engine.pipeline import ContentModerationError, MODERATION_USER_MESSAGE, is_moderation_error
 from engine.scene_utils import (
     duplicate_slot_numbers,
     ensure_scene_entries,
@@ -77,6 +78,17 @@ def _parse_voice_speed(raw) -> float:
     except (TypeError, ValueError):
         v = float(config.DEFAULT_VOICE_SPEED)
     return round(max(0.25, min(1.0, v)), 2)
+
+
+def _parse_bool(raw, default: bool = True) -> bool:
+    """Coerce form/JSON truthy values ("true"/"on"/1/True) into a bool."""
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw).strip().lower() in ("1", "true", "on", "yes")
 
 
 def _meta_path(project_id: str) -> Path:
@@ -462,6 +474,7 @@ def _run_generation(project_id: str, meta: dict) -> None:
             script=script,
             scene_plan=scene_plan,
             pre_segments=pre_segments,
+            abstraction_enabled=bool(meta.get("abstraction_enabled", config.DEFAULT_ABSTRACTION_ENABLED)),
         )
         scenes = ensure_scene_entries(scenes)
 
@@ -547,10 +560,25 @@ def _run_generation(project_id: str, meta: dict) -> None:
         )
         logger.info(f"Project {project_id} completed — {total} scenes.")
 
+    except ContentModerationError as exc:
+        logger.error("Project %s blocked by safety system: %s", project_id, exc)
+        _set_state(
+            project_id,
+            step="error",
+            progress=0,
+            error_kind="moderation",
+            message=MODERATION_USER_MESSAGE,
+        )
     except Exception as exc:
         logger.error(f"Project {project_id} failed: {exc}", exc_info=True)
-        _set_state(project_id, step="error", progress=0,
-                   message=f"Generation failed: {exc}")
+        if is_moderation_error(exc):
+            _set_state(project_id, step="error", progress=0,
+                       error_kind="moderation", message=MODERATION_USER_MESSAGE)
+        else:
+            _set_state(project_id, step="error", progress=0,
+                       error_kind="generic",
+                       message="Generation failed due to an unexpected error. "
+                               "Please review your script and try again.")
 
 
 # ─── Export & regenerate helpers ──────────────────────────────────────────────
@@ -1050,6 +1078,41 @@ def _enqueue_regen_job(project_id: str, parent_entry_id: str, instructions: str)
     return _regen_job_public(job)
 
 
+def _friendly_regen_error(exc: Exception) -> str:
+    """User-facing message for a regeneration failure (hides raw OpenAI errors)."""
+    if isinstance(exc, ContentModerationError):
+        return str(exc)
+    if is_moderation_error(exc):
+        return (
+            "This request was blocked by the AI safety system. "
+            "Adjust your wording and try again."
+        )
+    return "Image generation failed. The previous image was kept — please try again."
+
+
+def _discard_variant(project_id: str, entry_id: str) -> None:
+    """Remove a single scene variant row (and its image file) from a project."""
+    with _scene_lock(project_id):
+        scenes = _scenes_live(project_id)
+        kept: list[dict] = []
+        removed: dict | None = None
+        for s in scenes:
+            if s.get("entry_id") == entry_id:
+                removed = s
+            else:
+                kept.append(s)
+        if removed is None:
+            return
+        rel = removed.get("image_path")
+        if rel:
+            ip = config.PROJECTS_DIR / project_id / str(rel).replace("\\", "/")
+            try:
+                ip.unlink(missing_ok=True)
+            except OSError:
+                pass
+        _save_scenes(project_id, kept)
+
+
 def _run_regen_job(job_id: str) -> None:
     """Worker: refine prompt → append new variant row → generate image."""
     with _regen_jobs_lock:
@@ -1088,13 +1151,22 @@ def _run_regen_job(job_id: str) -> None:
         )
 
         # LLM prompt refinement happens *outside* the scene lock so multiple
-        # workers can call the text model in parallel.
-        new_prompt, new_neg = pipeline.refine_prompt_for_regeneration(
-            previous_prompt=base.get("prompt") or "",
-            previous_negative=base.get("negative_prompt"),
-            script_segment=base.get("script_segment") or "",
-            user_instructions=instructions,
-        )
+        # workers can call the text model in parallel. If the model rejects the
+        # request (safety/moderation), bail out BEFORE creating a new row so the
+        # previous image stays intact and the user can try again.
+        try:
+            new_prompt, new_neg = pipeline.refine_prompt_for_regeneration(
+                previous_prompt=base.get("prompt") or "",
+                previous_negative=base.get("negative_prompt"),
+                script_segment=base.get("script_segment") or "",
+                user_instructions=instructions,
+            )
+        except Exception as exc:
+            msg = _friendly_regen_error(exc)
+            logger.error("Regenerate prompt failed for job %s: %s", job_id, exc)
+            _update_regen_job(job_id, status="error", state="error",
+                              stage_message="Could not compose a new prompt", error=msg)
+            return
 
         # Append the new variant row under the scene lock so concurrent regens
         # don't collide on variant_index or filename.
@@ -1145,23 +1217,19 @@ def _run_regen_job(job_id: str) -> None:
             _update_regen_job(job_id, status="done", state="done",
                               stage_message=f"Done in {elapsed:.1f}s")
         except Exception as exc:
+            msg = _friendly_regen_error(exc)
             logger.error("Regenerate image failed for job %s: %s", job_id, exc, exc_info=True)
-            with _scene_lock(project_id):
-                scenes = _scenes_live(project_id)
-                hit2 = find_entry(scenes, neo["entry_id"])
-                if hit2 is not None:
-                    i, row = hit2
-                    row["image_status"] = "error"
-                    row["image_error"] = str(exc)
-                    scenes[i] = row
-                    _save_scenes(project_id, scenes)
+            # Keep the PREVIOUS version: drop the broken new variant (row + any
+            # partial file) so the user can simply regenerate again.
+            _discard_variant(project_id, neo["entry_id"])
             _update_regen_job(job_id, status="error", state="error",
                               stage_message="Image generation failed",
-                              error=str(exc))
+                              error=msg)
     except Exception as exc:
         logger.exception("Regenerate job %s crashed", job_id)
         _update_regen_job(job_id, status="error", state="error",
-                          stage_message="Job crashed", error=str(exc))
+                          stage_message="Regeneration failed",
+                          error=_friendly_regen_error(exc))
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -1226,6 +1294,9 @@ def api_generate():
     first_rate = int(data.get("first_rate", 3))
     rest_rate = int(data.get("rest_rate", 2))
     voice_speed = _parse_voice_speed(data.get("voice_speed", config.DEFAULT_VOICE_SPEED))
+    abstraction_enabled = _parse_bool(
+        data.get("abstraction_enabled"), config.DEFAULT_ABSTRACTION_ENABLED
+    )
 
     if not script:
         return jsonify({"error": "Script is required."}), 400
@@ -1270,6 +1341,7 @@ def api_generate():
         "first_rate": first_rate,
         "rest_rate": rest_rate,
         "voice_speed": voice_speed,
+        "abstraction_enabled": abstraction_enabled,
         "created_at": time.time(),
         "scene_plan": {},
     }
@@ -1322,6 +1394,7 @@ def api_status(project_id: str):
                 "image_path": s.get("image_path"),
                 "image_status": s.get("image_status", "pending"),
                 "image_error": s.get("image_error"),
+                "image_error_kind": s.get("image_error_kind"),
                 "slot_has_duplicates": slot in dup_set,
             }
         )
@@ -1588,25 +1661,46 @@ def api_download_export(project_id: str, job_id: str):
 def api_delete_scene_row(project_id: str, entry_id: str):
     if _load_meta(project_id) is None:
         abort(404)
-    scenes = _scenes_live(project_id)
-    removed: dict | None = None
-    kept: list[dict] = []
-    for s in scenes:
-        if s.get("entry_id") == entry_id:
-            removed = s
-        else:
-            kept.append(s)
-    if removed is None:
-        abort(404)
-    rel = removed.get("image_path")
-    if rel:
-        ip = config.PROJECTS_DIR / project_id / str(rel).replace("\\", "/")
-        if ip.exists():
-            try:
-                ip.unlink()
-            except OSError:
-                pass
-    _save_scenes(project_id, kept)
+    with _scene_lock(project_id):
+        scenes = _scenes_live(project_id)
+        removed: dict | None = None
+        kept: list[dict] = []
+        for s in scenes:
+            if s.get("entry_id") == entry_id:
+                removed = s
+            else:
+                kept.append(s)
+        if removed is None:
+            abort(404)
+
+        # A scene must always keep at least one image. Only allow deletion when
+        # the slot has more than one variant.
+        target_slot = int(removed.get("slot_number") or removed.get("scene_number") or 0)
+        siblings = sum(
+            1
+            for s in scenes
+            if int(s.get("slot_number") or s.get("scene_number") or 0) == target_slot
+        )
+        if siblings <= 1:
+            return (
+                jsonify(
+                    {
+                        "error": "This is the only image for this scene. "
+                        "Regenerate an alternative first, then you can delete one.",
+                    }
+                ),
+                400,
+            )
+
+        rel = removed.get("image_path")
+        if rel:
+            ip = config.PROJECTS_DIR / project_id / str(rel).replace("\\", "/")
+            if ip.exists():
+                try:
+                    ip.unlink()
+                except OSError:
+                    pass
+        _save_scenes(project_id, kept)
     return jsonify({"ok": True})
 
 

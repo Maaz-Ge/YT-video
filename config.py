@@ -35,8 +35,8 @@ ELEVEN_OUTPUT_FORMAT: str = os.getenv("ELEVEN_OUTPUT_FORMAT", "wav_44100")
 # speed=1.0 is the natural pace; keep the rest fixed so every chunk of the
 # combined voice-over sounds identical.
 ELEVEN_VOICE_SETTINGS: dict = {
-    "stability":        float(os.getenv("ELEVEN_STABILITY",        "0.75")),
-    "similarity_boost": float(os.getenv("ELEVEN_SIMILARITY_BOOST", "0.85")),
+    "stability":        float(os.getenv("ELEVEN_STABILITY",        "0.50")),
+    "similarity_boost": float(os.getenv("ELEVEN_SIMILARITY_BOOST", "0.65")),
     "style":            float(os.getenv("ELEVEN_STYLE",            "0.07")),
     "use_speaker_boost": True,
     "speed":            float(os.getenv("ELEVEN_SPEED",            "1.0")),
@@ -71,6 +71,12 @@ WORDS_PER_MINUTE: int = 150     # legacy fallback (kept for reference)
 MIN_DURATION: float   = 1.0     # minimum video duration in minutes
 FIRST_SEGMENT: int    = 5       # minutes before the scene-rate switches
 DEFAULT_VOICE_SPEED: float = 1.0   # ElevenLabs narration speed (0.25–1.0); locked per project at create time
+
+# ── Abstraction (conceptual "absence" visuals) ───────────────────────────────
+# When enabled, conceptual/intangible script lines become symbolic absence-based
+# images (empty pedestal, fading clock, …). When disabled, every scene is a
+# literal/atmospheric visual of whatever the script actually describes.
+DEFAULT_ABSTRACTION_ENABLED: bool = False
 
 # ── Generation settings ───────────────────────────────────────────────────────
 MAX_WORKERS: int = int(os.getenv("MAX_WORKERS", "3"))

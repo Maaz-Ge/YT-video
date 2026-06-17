@@ -61,6 +61,26 @@ function showToast(message, type = "info", duration = 4000) {
   }, duration);
 }
 
+/* Persist a toast across a redirect (e.g. fatal error → back to the studio). */
+function stashPendingToast(message, type = "info") {
+  try {
+    sessionStorage.setItem("pendingToast", JSON.stringify({ message, type }));
+  } catch (e) { /* sessionStorage unavailable */ }
+}
+
+function flushPendingToast() {
+  let raw = null;
+  try {
+    raw = sessionStorage.getItem("pendingToast");
+    if (raw) sessionStorage.removeItem("pendingToast");
+  } catch (e) { return; }
+  if (!raw) return;
+  try {
+    const { message, type } = JSON.parse(raw);
+    if (message) showToast(message, type || "info", 7000);
+  } catch (e) { /* malformed */ }
+}
+
 /* ── Clipboard helper ─────────────────────────────────────────────────────── */
 
 function copyPrompt(btn) {
@@ -316,6 +336,18 @@ function initCreateForm() {
 
   if (!form) return;
 
+  const abstractionToggle = form.querySelector("#abstraction_enabled");
+  const abstractionHint = document.getElementById("abstraction-hint");
+  if (abstractionToggle && abstractionHint) {
+    const syncAbstractionHint = () => {
+      abstractionHint.textContent = abstractionToggle.checked
+        ? "On — intangible ideas become symbolic absence-based images"
+        : "Off — every scene is a literal depiction of what the script describes";
+    };
+    abstractionToggle.addEventListener("change", syncAbstractionHint);
+    syncAbstractionHint();
+  }
+
   function setSubmitting(busy) {
     if (busy) {
       submitLabel.textContent = "Launching generation…";
@@ -435,6 +467,8 @@ function initCreateForm() {
     const formData = new FormData(form);
     const payload  = Object.fromEntries(formData.entries());
     payload.voice_speed = getVoiceSpeed();
+    const abstractionEl = form.querySelector("#abstraction_enabled");
+    payload.abstraction_enabled = abstractionEl ? (abstractionEl.checked ? "true" : "false") : "false";
 
     let estimate = window._latestEstimate;
     try {
@@ -476,6 +510,9 @@ function initProjectPage() {
 
   const step = typeof window.INIT_STEP === "string" ? window.INIT_STEP : "queued";
   const progress = typeof window.INIT_PROGRESS === "number" ? window.INIT_PROGRESS : 0;
+  // Only bounce to the studio when the failure happens live in this session.
+  // Opening an already-failed project should stay put so it can be inspected.
+  window._suppressErrorRedirect = step === "error";
   const progressSection = document.getElementById("progress-section");
   if (progressSection) {
     progressSection.style.display =
@@ -567,15 +604,17 @@ function onSceneGridClick(e) {
 
   const del = e.target.closest(".btn-delete-variant");
   if (del) {
+    if (del.disabled) return;
     const id = del.getAttribute("data-entry-id");
     if (!id || !confirm("Delete this image variant? This cannot be undone.")) return;
     fetch(`/api/projects/${window.PROJECT_ID}/scenes/${id}`, { method: "DELETE" })
-      .then((r) => {
-        if (!r.ok) throw new Error("Delete failed");
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || "Delete failed.");
         showToast("Variant removed.", "ok");
         pollStatus();
       })
-      .catch(() => showToast("Delete failed.", "error"));
+      .catch((err) => showToast(err.message || "Delete failed.", "error"));
     return;
   }
 
@@ -669,8 +708,19 @@ function applyStatus(data) {
   }
 
   if (step === "error") {
-    showToast(`Error: ${message}`, "error", 8000);
     clearTimeout(_pollTimer);
+    if (!window._errorHandled) {
+      window._errorHandled = true;
+      const friendly = message || "Generation failed. Please try again.";
+      if (window._suppressErrorRedirect) {
+        // Already-failed project opened directly — show the reason, stay put.
+        showToast(friendly, "error", 7000);
+      } else {
+        stashPendingToast(friendly, "error");
+        showToast(friendly, "error", 5000);
+        setTimeout(() => { window.location.href = "/"; }, 2800);
+      }
+    }
   }
 
   updateDuplicateBanner(data.duplicate_slots);
@@ -844,7 +894,20 @@ function updateSceneCardMedia(card, scene) {
     if (scene.image_status === "error") err.textContent = scene.image_error || "Image failed";
   }
   const regBtn = card.querySelector(".btn-regenerate-variant");
-  if (regBtn) regBtn.disabled = scene.image_status !== "done";
+  if (regBtn) regBtn.disabled = scene.image_status === "pending";
+
+  const delBtn = card.querySelector(".btn-delete-variant");
+  if (delBtn) {
+    delBtn.disabled = !scene.slot_has_duplicates;
+    if (scene.slot_has_duplicates) {
+      delBtn.removeAttribute("title");
+    } else {
+      delBtn.setAttribute(
+        "title",
+        "A scene must keep at least one image. Regenerate an alternative first."
+      );
+    }
+  }
 
   let dupBar = card.querySelector(".scene-dup-banner");
   if (scene.slot_has_duplicates) {
@@ -965,8 +1028,8 @@ function buildSceneCard(scene, idx) {
         ${scriptSegHtml}
       </div>
       <div class="scene-card-actions">
-        <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}" ${scene.image_status === "done" ? "" : "disabled"}>Regenerate</button>
-        <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}">Delete variant</button>
+        <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}" ${scene.image_status === "pending" ? "disabled" : ""}>Regenerate</button>
+        <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}" ${scene.slot_has_duplicates ? "" : 'disabled title="A scene must keep at least one image. Regenerate an alternative first."'}>Delete variant</button>
       </div>
       <details class="scene-prompt-details">
         <summary class="scene-prompt-toggle">
@@ -1034,6 +1097,7 @@ function updateExportAvailability(data) {
 
 let _exportJobId = null;
 let _exportPollTimer = null;
+let _exportRunning = false;
 
 function initExportButton() {
   const btn = document.getElementById("btn-export-zip");
@@ -1065,6 +1129,7 @@ function initExportButton() {
       }
       const data = await res.json();
       _exportJobId = data.job.job_id;
+      _exportRunning = true;
       openExportModal();
       pollExportStatus();
     } catch (e) {
@@ -1075,14 +1140,12 @@ function initExportButton() {
 
   const closeBtn = document.getElementById("export-modal-close");
   if (closeBtn) {
-    closeBtn.addEventListener("click", () => closeExportModal(false));
-  }
-  const overlay = document.getElementById("export-modal");
-  if (overlay) {
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) closeExportModal(false);
+    closeBtn.addEventListener("click", () => {
+      if (_exportRunning) return;
+      closeExportModal(false);
     });
   }
+  // Do NOT close on backdrop click — accidental clicks must not cancel the export.
 }
 
 function openExportModal() {
@@ -1090,15 +1153,43 @@ function openExportModal() {
   if (!modal) return;
   modal.hidden = false;
   setExportProgress(0, "Queued…", "");
+  const closeBtn = document.getElementById("export-modal-close");
+  const note = document.getElementById("export-modal-note");
+  if (closeBtn) closeBtn.hidden = true;
+  if (note) {
+    note.hidden = false;
+    note.textContent = "Please wait — do not close this window until the download finishes.";
+  }
 }
 
 function closeExportModal(success) {
+  if (_exportRunning && !success) return;
   const modal = document.getElementById("export-modal");
   if (modal) modal.hidden = true;
   clearTimeout(_exportPollTimer);
   _exportPollTimer = null;
+  _exportRunning = false;
+  _exportJobId = null;
   const btn = document.getElementById("btn-export-zip");
   if (btn) btn.disabled = false;
+  const closeBtn = document.getElementById("export-modal-close");
+  const note = document.getElementById("export-modal-note");
+  if (closeBtn) closeBtn.hidden = true;
+  if (note) note.hidden = true;
+}
+
+function setExportModalFinished(ok, message) {
+  _exportRunning = false;
+  const closeBtn = document.getElementById("export-modal-close");
+  const note = document.getElementById("export-modal-note");
+  if (closeBtn) {
+    closeBtn.hidden = false;
+    closeBtn.textContent = ok ? "Close" : "Close";
+  }
+  if (note) {
+    note.hidden = false;
+    note.textContent = message || (ok ? "Download complete." : "Export failed — you can close this window.");
+  }
 }
 
 function setExportProgress(percent, stage, count) {
@@ -1120,7 +1211,7 @@ async function pollExportStatus() {
     );
     if (!res.ok) {
       showToast("Lost the export job.", "error");
-      closeExportModal(false);
+      setExportModalFinished(false, "Export lost — close when ready.");
       return;
     }
     const data = await res.json();
@@ -1140,6 +1231,7 @@ async function pollExportStatus() {
       showToast(msg, "error", 8000);
       const stageEl = document.getElementById("export-modal-stage");
       if (stageEl) stageEl.textContent = msg;
+      setExportModalFinished(false, msg);
       const btn = document.getElementById("btn-export-zip");
       if (btn) btn.disabled = false;
       return;
@@ -1159,7 +1251,9 @@ function triggerExportDownload(job) {
   a.click();
   a.remove();
   showToast("ZIP downloaded.", "ok");
-  setTimeout(() => closeExportModal(true), 800);
+  setExportModalFinished(true, "Download complete — you can close this window.");
+  const btn = document.getElementById("btn-export-zip");
+  if (btn) btn.disabled = false;
 }
 
 /* ── Lightbox ─────────────────────────────────────────────────────────────── */
@@ -1662,6 +1756,7 @@ function escapeAttr(str) {
 /* ── Bootstrap ────────────────────────────────────────────────────────────── */
 
 document.addEventListener("DOMContentLoaded", () => {
+  flushPendingToast();
   initEstimatePanel();
   initCreateForm();
   initHomePage();

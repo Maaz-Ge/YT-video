@@ -2428,3 +2428,74 @@ details > summary::-webkit-details-marker { display: none; }
   transform: rotate(90deg);
 }
 body.body-lock { overflow: hidden; }
+
+/* ── Toggle switch (abstraction on/off) ───────────────────────────────────── */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-md);
+  padding: var(--sp-md);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.toggle-row:hover { border-color: var(--border-mid); }
+
+.toggle-switch { position: relative; flex-shrink: 0; line-height: 0; }
+.toggle-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.toggle-track {
+  display: inline-block;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-mid);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.toggle-thumb {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--text-2);
+  transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+.toggle-switch input:checked + .toggle-track {
+  background: var(--gold-dim);
+  border-color: var(--gold);
+}
+.toggle-switch input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(18px);
+  background: var(--gold-light);
+}
+.toggle-switch input:focus-visible + .toggle-track {
+  outline: 2px solid var(--gold-glow);
+  outline-offset: 2px;
+}
+.toggle-copy { display: flex; flex-direction: column; gap: 2px; }
+.toggle-title { font-size: 0.9rem; color: var(--text-1); font-weight: 500; }
+.toggle-sub { font-size: 0.78rem; color: var(--text-2); }
+
+/* Disabled action buttons (e.g. delete the only image for a scene) */
+.scene-card-actions .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.export-modal-note {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-2);
+  text-align: center;
+  line-height: 1.45;
+}

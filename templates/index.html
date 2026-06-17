@@ -321,6 +321,27 @@
           </div>
         </div>
 
+        <!-- Visual interpretation (abstraction toggle) -->
+        <div class="timing-section">
+          <div class="form-label-row">
+            <p class="form-label">Visual interpretation</p>
+            <button type="button" class="info-btn"
+              data-tip="Abstract (conceptual) visuals turn intangible lines — “vanished without a trace”, “time passed”, “lost knowledge” — into symbolic absence-based images (an empty pedestal, a fading clock, a doorway into darkness).&#10;&#10;ON: conceptual lines become symbolic images; concrete lines stay literal.&#10;OFF: every scene is a literal, atmospheric depiction of exactly what the script describes.">
+              ⓘ About abstract visuals
+            </button>
+          </div>
+          <label class="toggle-row" for="abstraction_enabled">
+            <span class="toggle-switch">
+              <input type="checkbox" id="abstraction_enabled" name="abstraction_enabled" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </span>
+            <span class="toggle-copy">
+              <span class="toggle-title">Abstract / conceptual visuals</span>
+              <span class="toggle-sub" id="abstraction-hint">Off — every scene is a literal depiction of what the script describes</span>
+            </span>
+          </label>
+        </div>
+
         <!-- Submit -->
         <button
           type="submit"

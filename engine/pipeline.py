@@ -20,11 +20,61 @@ from typing import Callable
 from openai import OpenAI
 
 import config
-from engine.style_guide import SCENE_SPLIT_SYSTEM_PROMPT
+from engine.style_guide import (
+    SCENE_TYPE_NAMES,
+    build_scene_split_system_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
 _client: OpenAI | None = None
+
+
+# ─── Content-moderation handling ─────────────────────────────────────────────
+
+# User-facing copy shown whenever OpenAI blocks script/scene content for safety.
+MODERATION_USER_MESSAGE = (
+    "Your script contains content that was blocked by the AI safety system. "
+    "Please edit the flagged wording and try again."
+)
+MODERATION_SCENE_MESSAGE = (
+    "This scene was blocked by the AI safety system. "
+    "Edit the wording for this part of the script, then regenerate."
+)
+
+# Substrings that identify a safety/moderation rejection across text + image APIs.
+_MODERATION_MARKERS = (
+    "moderation_blocked",
+    "content_policy_violation",
+    "content_filter",
+    "safety system",
+    "safety_system",
+    "rejected by the safety",
+    "image_generation_user_error",
+    "your request was rejected",
+)
+
+
+class ContentModerationError(RuntimeError):
+    """Raised when OpenAI rejects script/scene content for safety reasons."""
+
+    def __init__(self, message: str = MODERATION_USER_MESSAGE, *, original: Exception | None = None):
+        super().__init__(message)
+        self.original = original
+
+
+def is_moderation_error(exc: Exception) -> bool:
+    """Best-effort detection of an OpenAI safety/moderation rejection."""
+    if isinstance(exc, ContentModerationError):
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.lower() in (
+        "moderation_blocked",
+        "content_policy_violation",
+    ):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _MODERATION_MARKERS)
 
 
 def _get_client() -> OpenAI:
@@ -479,11 +529,28 @@ def build_scene_segments_from_sentences(
     return segments
 
 
+def _sanitize_scene_enrichment(row: dict, abstraction_enabled: bool) -> dict:
+    """When abstract mode is off, strip any LLM hallucinated abstraction fields."""
+    if abstraction_enabled:
+        return row
+    out = dict(row)
+    out["abstraction_mode"] = False
+    out.pop("abstraction_concept", None)
+    out.pop("absence_technique", None)
+    st = int(out.get("scene_type") or 0)
+    if st == 4:
+        # Remap accidental Type 4 → Environmental Wide (safe literal default).
+        out["scene_type"] = 2
+        out["scene_type_name"] = SCENE_TYPE_NAMES.get(2, "Environmental Wide Shot")
+    return out
+
+
 def split_and_prompt(
     title: str,
     script: str,
     scene_plan: dict,
     pre_segments: list[dict] | None = None,
+    abstraction_enabled: bool = False,
 ) -> list[dict]:
     """
     Two-stage scene build:
@@ -520,11 +587,21 @@ def split_and_prompt(
         for p in pre_segments
     ]
 
-    system_prompt = SCENE_SPLIT_SYSTEM_PROMPT.format(
+    system_prompt = build_scene_split_system_prompt(
         scene_count=scene_count,
         duration_minutes=duration_minutes,
         duration_seconds=duration_seconds,
+        abstraction_enabled=abstraction_enabled,
     )
+
+    literal_note = ""
+    if not abstraction_enabled:
+        literal_note = (
+            "\n\nCRITICAL: Abstract/conceptual mode is OFF for this project. "
+            "Use only literal scene types 1, 2, 3, or 5. Do not output "
+            "abstraction_mode, abstraction_concept, or absence_technique fields. "
+            "Depict concrete real-world subjects only.\n"
+        )
 
     user_msg = (
         f"VIDEO TITLE: {title}\n"
@@ -532,9 +609,9 @@ def split_and_prompt(
         f"SCENE COUNT: {scene_count}\n\n"
         "IMPORTANT: The script has already been split into equally-sized scenes. "
         "Do NOT change scene_number, start_time, end_time, duration, or script_segment. "
-        "Return them verbatim. Your job is to add the documentary classification, "
-        "shot rhythm (is_vista_shot, shot_scale per Step 3.5), human figure policy, "
-        "and Tatterveil image prompt for each scene.\n\n"
+        "Return them verbatim. Your job is to add the documentary classification and "
+        "Tatterveil image prompt for each scene.\n"
+        f"{literal_note}\n"
         f"LOCKED SCENES (use exactly these segments and timings):\n"
         f"{json.dumps(locked_payload, ensure_ascii=False)}\n\n"
         f"FULL SCRIPT (context only — for tone / continuity):\n{script.strip()}"
@@ -585,10 +662,14 @@ def split_and_prompt(
                 row["word_count"]   = pre["word_count"]
                 if pre.get("sentence_indices") is not None:
                     row["sentence_indices"] = pre["sentence_indices"]
+                row = _sanitize_scene_enrichment(row, abstraction_enabled)
                 merged.append(row)
             return merged
 
         except Exception as exc:
+            if is_moderation_error(exc):
+                logger.error("Scene-prompt generation blocked by safety system: %s", exc)
+                raise ContentModerationError(original=exc) from exc
             logger.warning(f"LLM attempt {attempt + 1}/{config.MAX_RETRIES} failed: {exc}")
             if attempt < config.MAX_RETRIES - 1:
                 time.sleep(config.RETRY_DELAY * (attempt + 1))
@@ -680,6 +761,14 @@ def generate_image(
 
         except Exception as exc:
             last_exc = exc
+            if is_moderation_error(exc):
+                # Retrying the same prompt won't pass moderation — fail fast.
+                logger.error(
+                    "Scene %s image blocked by safety system: %s", scene_num, exc
+                )
+                raise ContentModerationError(
+                    MODERATION_SCENE_MESSAGE, original=exc
+                ) from exc
             logger.warning(
                 f"Image attempt {attempt + 1}/{config.MAX_RETRIES} "
                 f"for scene {scene_num} failed: {exc}"
@@ -737,7 +826,14 @@ def generate_all_images(
                 per_scene_times[eid]            = elapsed
             except Exception as exc:
                 results[eid]["image_status"] = "error"
-                results[eid]["image_error"]  = str(exc)
+                if is_moderation_error(exc):
+                    results[eid]["image_error"] = MODERATION_SCENE_MESSAGE
+                    results[eid]["image_error_kind"] = "moderation"
+                else:
+                    results[eid]["image_error"] = (
+                        "Image generation failed. Please try regenerating this scene."
+                    )
+                    results[eid]["image_error_kind"] = "generic"
                 logger.error(f"Entry {eid} image failed permanently: {exc}")
 
             if on_progress:
@@ -787,9 +883,7 @@ Return a JSON object with keys:
   "negative_prompt": string or null — revised negative constraints; if minor change only, reuse and lightly adjust the previous negatives; use null only if no negatives are needed.
 
 Rules:
-- Preserve period, scene type, shot_scale, and is_vista_shot intent from the original unless the user explicitly asks to change them.
-- Vista/establishing shots: high vantage, atmospheric perspective, depth layers, specific weather and time of day — never generic flat postcard wides.
-- Humans: include period-accurate figures when the script calls for people; faces never readable (backs turned, shadow, distance, silhouette only).
+- Preserve period, scene type, and composition intent from the original unless the user explicitly asks to change them.
 - Keep 16:9 landscape, photorealistic documentary language, no watermarks, no text in image.
 - Apply the user's new instructions faithfully while staying stylistically consistent.
 """
@@ -835,6 +929,11 @@ def refine_prompt_for_regeneration(
                 raise ValueError("empty prompt from model")
             return pos, neg
         except Exception as exc:
+            if is_moderation_error(exc):
+                logger.error("Regeneration prompt blocked by safety system: %s", exc)
+                raise ContentModerationError(
+                    MODERATION_SCENE_MESSAGE, original=exc
+                ) from exc
             logger.warning("refine_prompt attempt %s failed: %s", attempt + 1, exc)
             if attempt < config.MAX_RETRIES - 1:
                 time.sleep(config.RETRY_DELAY * (attempt + 1))
