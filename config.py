@@ -14,12 +14,10 @@ TEXT_MODEL:  str = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")   # scene spli
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL",       "gpt-image-2")    # image generation
 
 # ── Speech-to-text (sentence-level timing for logical scene splitting) ───────
-# Only `whisper-1` returns word/segment timestamps (timestamp_granularities),
-# which we need to align each script sentence to the real voice-over timeline.
-# gpt-4o-transcribe is more accurate on text but exposes no timestamps, and we
-# discard the transcript text anyway (the original script is the source of truth),
-# so whisper-1 is the right choice here.
-STT_MODEL: str = os.getenv("STT_MODEL", "whisper-1")
+# Hybrid STT: gpt-4o-transcribe for accurate transcript alignment; whisper-1
+# for word-level timestamps (gpt-4o-transcribe does not expose timestamps).
+STT_MODEL: str = os.getenv("STT_MODEL", "gpt-4o-transcribe")
+STT_TIMING_MODEL: str = os.getenv("STT_TIMING_MODEL", "whisper-1")
 # OpenAI caps a single transcription upload at 25 MB; we split the WAV into
 # time slices safely under this many bytes and stitch the timestamps back.
 STT_MAX_UPLOAD_BYTES: int = int(os.getenv("STT_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
@@ -82,6 +80,10 @@ DEFAULT_ABSTRACTION_ENABLED: bool = False
 MAX_WORKERS: int = int(os.getenv("MAX_WORKERS", "3"))
 MAX_RETRIES: int  = 3
 RETRY_DELAY: float = 2.5
+# Auto-rephrase image prompts this many times when OpenAI blocks on safety (initial gen only).
+IMAGE_MODERATION_RETRIES: int = int(os.getenv("IMAGE_MODERATION_RETRIES", "3"))
+# Scenes per LLM enrichment batch (avoids truncation on very long projects).
+PROMPT_BATCH_SIZE: int = int(os.getenv("PROMPT_BATCH_SIZE", "25"))
 # Parallel ffmpeg encodes during ZIP export (CPU-bound; safe to raise on multi-core VPS).
 EXPORT_FFMPEG_WORKERS: int = int(os.getenv("EXPORT_FFMPEG_WORKERS", "4"))
 

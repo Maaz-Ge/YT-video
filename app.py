@@ -393,7 +393,12 @@ def _run_generation(project_id: str, meta: dict) -> None:
         # on whole sentences that line up with the spoken narration. We keep the
         # ORIGINAL script text (STT output is used only for timing).
         sentence_timeline: dict | None = None
-        if voiceover_info.get("status") == "done" and config.OPENAI_API_KEY:
+        if voiceover_info.get("status") == "done":
+            if not config.OPENAI_API_KEY:
+                raise RuntimeError(
+                    "OPENAI_API_KEY is required to transcribe the voice-over and "
+                    "build accurate per-sentence scene timestamps."
+                )
             stt_start = time.monotonic()
             _set_state(project_id, step="transcribing", progress=37,
                        message="Transcribing voice-over to time each sentence…")
@@ -418,7 +423,10 @@ def _run_generation(project_id: str, meta: dict) -> None:
                 )
             except Exception as exc:
                 logger.error("Sentence timeline (STT) failed: %s", exc, exc_info=True)
-                sentence_timeline = None
+                raise RuntimeError(
+                    "Could not build sentence timeline from the voice-over. "
+                    "Accurate scene timing requires successful STT."
+                ) from exc
             timing_log["stt_seconds"] = round(time.monotonic() - stt_start, 2)
 
         # ── Step 4: Compute scene plan from the actual duration ──────────────
@@ -430,18 +438,29 @@ def _run_generation(project_id: str, meta: dict) -> None:
 
         # ── Step 5: Build scene segments ─────────────────────────────────────
         # Preferred: logical grouping of whole sentences (timestamps from STT).
-        # Fallback: the legacy equal-word split when STT is unavailable.
+        # Fallback: equal-word split only when voice-over was not generated.
         pre_segments = None
         if sentence_timeline and sentence_timeline.get("sentences"):
-            try:
-                pre_segments = pipeline.build_scene_segments_from_sentences(
-                    title=meta["name"],
-                    sentences=sentence_timeline["sentences"],
-                    scene_plan=scene_plan,
+            audio_dur = float(
+                sentence_timeline.get("audio_duration_seconds")
+                or voiceover_info.get("duration_seconds")
+                or scene_plan.get("duration_seconds")
+                or 0
+            )
+            pre_segments = pipeline.build_scene_segments_from_sentences(
+                title=meta["name"],
+                sentences=sentence_timeline["sentences"],
+                scene_plan=scene_plan,
+                audio_duration=audio_dur,
+            )
+            planned = int(scene_plan.get("total_scenes") or 0)
+            actual = len(pre_segments)
+            if planned and abs(actual - planned) > max(3, int(planned * 0.1)):
+                logger.warning(
+                    "Scene count from sentence split (%s) differs from duration "
+                    "estimate (%s) — using measured voice timeline.",
+                    actual, planned,
                 )
-            except Exception as exc:
-                logger.error("Sentence-based grouping failed: %s", exc, exc_info=True)
-                pre_segments = None
 
         # When grouping succeeded, the real scene count drives the plan + cost.
         if pre_segments:
@@ -508,6 +527,7 @@ def _run_generation(project_id: str, meta: dict) -> None:
             resolution=meta.get("resolution", config.DEFAULT_RESOLUTION),
             project_dir=project_dir,
             on_progress=on_progress,
+            auto_rephrase_on_moderation=True,
         )
 
         timing_log["image_seconds"] = round(time.monotonic() - step_start, 2)

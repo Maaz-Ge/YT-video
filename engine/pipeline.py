@@ -265,52 +265,15 @@ def compute_equal_segments(script: str, scene_plan: dict) -> list[dict]:
     return segments
 
 
-# ─── 3b. Sentence-aligned logical scene grouping (per-minute scene budget) ────
-
-SCENE_GROUPING_SYSTEM = """\
-You are a documentary video editor. A narrated script has been transcribed and split \
-into numbered SENTENCES, each with the exact start/end time (seconds) measured from the \
-real voice-over. The sentences are organised into one-MINUTE buckets, and every minute \
-has a required number of scenes (target_scenes).
-
-Your job: within EACH minute, group that minute's consecutive sentences into EXACTLY \
-target_scenes scenes. One image will represent each scene.
-
-HARD RULES (never break):
-1. NEVER split a sentence — each sentence belongs to exactly one scene.
-2. NEVER put sentences from different minutes into the same scene.
-3. For each minute, output EXACTLY target_scenes scenes that use ALL of that minute's \
-   sentences, in order, with no gaps or overlaps.
-4. Keep related sentences together (group by meaning) while making the scenes within a \
-   minute as balanced in spoken length as you reasonably can.
-5. If a minute's target_scenes equals its sentence count, every sentence becomes its \
-   own scene.
-
-OUTPUT — JSON only, no prose:
-{
-  "scenes": [
-    { "scene_number": 1, "minute": 0, "sentence_indices": [1, 2] },
-    { "scene_number": 2, "minute": 0, "sentence_indices": [3, 4] }
-  ]
-}
-List scenes in time order. Every sentence index must appear exactly once.
-"""
-
+# ─── 3b. Sentence-aligned scene grouping (per-minute scene budget) ───────────
 
 def _minute_index(sentence: dict) -> int:
-    """Which one-minute bucket a sentence belongs to, by its midpoint time.
-
-    Using the midpoint gives a natural tolerance at every minute boundary: a
-    sentence that mostly plays before the boundary stays in the earlier minute,
-    one that mostly plays after it moves to the next minute.
-    """
-    start = float(sentence.get("start_time", 0.0))
-    end = float(sentence.get("end_time", start))
-    return int(((start + end) / 2.0) // 60)
+    """Calendar minute bucket from when the sentence *starts* in the audio."""
+    return int(float(sentence.get("start_time", 0.0)) // 60)
 
 
-def _partition_by_time(sentences: list[dict], k: int) -> list[list[dict]]:
-    """Split consecutive sentences into k time-balanced groups (no sentence cut)."""
+def _partition_sentences(sentences: list[dict], k: int) -> list[list[dict]]:
+    """Split consecutive sentences into k contiguous, as-equal-as-possible groups."""
     n = len(sentences)
     if n == 0 or k <= 0:
         return []
@@ -320,47 +283,21 @@ def _partition_by_time(sentences: list[dict], k: int) -> list[list[dict]]:
     if k == n:
         return [[s] for s in sentences]
 
-    cum = [0.0]
-    for s in sentences:
-        dur = float(s.get("duration") or 0.0)
-        if dur <= 0:
-            dur = max(0.0, float(s.get("end_time", 0)) - float(s.get("start_time", 0)))
-        cum.append(cum[-1] + dur)
-    total = cum[-1]
-
-    cuts: list[int] = []
-    if total > 0:
-        for i in range(1, k):
-            target = total * i / k
-            best_j, best_d = 1, abs(cum[1] - target)
-            for j in range(1, n):
-                d = abs(cum[j] - target)
-                if d < best_d:
-                    best_j, best_d = j, d
-            cuts.append(best_j)
-
-    cuts = sorted({c for c in cuts if 0 < c < n})
-    if len(cuts) != k - 1:
-        # Degenerate (e.g. zero-duration) — fall back to an even index split.
-        cuts = sorted({min(max(round(i * n / k), 1), n - 1) for i in range(1, k)})
-
+    boundaries = [round(i * n / k) for i in range(k + 1)]
     groups: list[list[dict]] = []
-    prev = 0
-    for c in cuts:
-        groups.append(list(sentences[prev:c]))
-        prev = c
-    groups.append(list(sentences[prev:]))
-    return [g for g in groups if g]
+    for i in range(k):
+        group = list(sentences[boundaries[i]:boundaries[i + 1]])
+        if group:
+            groups.append(group)
+    return groups
 
 
-def _build_minute_plan(sentences: list[dict], scene_plan: dict) -> list[dict]:
-    """Bucket sentences per minute and assign each minute a target scene count.
-
-    target_scenes = the requested rate for that minute (first_rate for the first
-    FIRST_SEGMENT minutes, rest_rate afterwards), capped at the number of
-    sentences in the minute — we can never make more scenes than sentences
-    without splitting a sentence.
-    """
+def _build_minute_plan(
+    sentences: list[dict],
+    scene_plan: dict,
+    audio_duration: float,
+) -> list[dict]:
+    """Bucket sentences by calendar minute; each minute gets up to `rate` scenes."""
     first_rate = max(1, int(scene_plan.get("first_rate", 1) or 1))
     rest_rate = max(1, int(scene_plan.get("rest_rate", 1) or 1))
 
@@ -368,145 +305,76 @@ def _build_minute_plan(sentences: list[dict], scene_plan: dict) -> list[dict]:
     for s in sentences:
         buckets.setdefault(_minute_index(s), []).append(s)
 
+    max_minute = max(0, int(float(audio_duration) // 60))
     plan: list[dict] = []
-    for minute in sorted(buckets):
-        bucket = buckets[minute]
+    for minute in range(max_minute + 1):
+        bucket = buckets.get(minute)
+        if not bucket:
+            continue
         rate = first_rate if minute < int(config.FIRST_SEGMENT) else rest_rate
-        target = max(1, min(rate, len(bucket)))
+        target = min(rate, len(bucket))
         plan.append({"minute": minute, "sentences": bucket, "target": target})
     return plan
 
 
-def _minute_groups_valid(groups: list[list[dict]] | None, entry: dict) -> bool:
-    """True when one minute's groups use all its sentences in exactly the target
-    number of scenes, in order, with no sentence split or reordering."""
-    if not groups or len(groups) != int(entry["target"]):
-        return False
-    expected = [int(s["sentence_index"]) for s in entry["sentences"]]
-    flat: list[int] = []
-    for g in groups:
-        if not g:
-            return False
-        flat.extend(int(s["sentence_index"]) for s in g)
-    return flat == expected
-
-
-def _llm_group_minutes(title: str, plan: list[dict]) -> dict[int, list[list[dict]]] | None:
-    """Ask the LLM to group each minute's sentences into its target scene count.
-
-    Returns {minute_index: [group, ...]} (each minute validated by the caller),
-    or None when the call fails outright.
-    """
-    by_index = {int(s["sentence_index"]): s for e in plan for s in e["sentences"]}
-    total_scenes = sum(int(e["target"]) for e in plan)
-    minutes_payload = [
-        {
-            "minute": e["minute"],
-            "target_scenes": int(e["target"]),
-            "sentences": [
-                {
-                    "sentence_index": int(s["sentence_index"]),
-                    "start_time": s["start_time"],
-                    "end_time": s["end_time"],
-                    "text": s["text"],
-                }
-                for s in e["sentences"]
-            ],
-        }
-        for e in plan
-    ]
-    user_msg = (
-        f"VIDEO TITLE: {title}\n"
-        f"MINUTES: {len(plan)} | TOTAL SCENES REQUIRED: {total_scenes}\n\n"
-        "Group each minute's sentences into exactly its target_scenes scenes, "
-        "following every hard rule. Return JSON only.\n\n"
-        f"MINUTES:\n{json.dumps(minutes_payload, ensure_ascii=False)}"
-    )
-
-    client = _get_client()
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            response = client.chat.completions.create(
-                model=config.TEXT_MODEL,
-                messages=[
-                    {"role": "system", "content": SCENE_GROUPING_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=0.2,
-                response_format={"type": "json_object"},
-            )
-            raw = response.choices[0].message.content or "{}"
-            data = json.loads(re.sub(r"```(?:json)?\s*", "", raw).strip())
-            scene_rows = data.get("scenes") if isinstance(data, dict) else data
-            if not isinstance(scene_rows, list):
-                raise ValueError("missing 'scenes' array")
-
-            by_minute: dict[int, list[list[dict]]] = {}
-            for row in scene_rows:
-                idxs = row.get("sentence_indices") if isinstance(row, dict) else None
-                if not isinstance(idxs, list) or not idxs:
-                    continue
-                group = [by_index[int(i)] for i in idxs if int(i) in by_index]
-                if not group:
-                    continue
-                # A scene belongs to the minute of its first sentence; cross-minute
-                # scenes simply fail that minute's validation downstream.
-                by_minute.setdefault(_minute_index(group[0]), []).append(group)
-            return by_minute
-        except Exception as exc:
-            logger.warning("LLM minute-grouping attempt %s failed: %s", attempt + 1, exc)
-            if attempt < config.MAX_RETRIES - 1:
-                time.sleep(config.RETRY_DELAY * (attempt + 1))
-    return None
+def _normalize_segments(segments: list[dict], audio_duration: float) -> list[dict]:
+    """Ensure monotonic timeline; last scene ends exactly at audio length."""
+    if not segments:
+        return segments
+    out: list[dict] = []
+    for i, seg in enumerate(segments):
+        start = float(seg["start_time"])
+        end = float(seg["end_time"])
+        if i == 0:
+            start = 0.0
+        elif out:
+            prev_end = float(out[-1]["end_time"])
+            if start < prev_end:
+                start = prev_end
+        if end < start:
+            end = start
+        row = dict(seg)
+        row["start_time"] = round(start, 3)
+        row["end_time"] = round(end, 3)
+        row["duration"] = round(end - start, 3)
+        out.append(row)
+    out[-1]["end_time"] = round(float(audio_duration), 3)
+    out[-1]["duration"] = round(out[-1]["end_time"] - out[-1]["start_time"], 3)
+    return out
 
 
 def build_scene_segments_from_sentences(
     title: str,
     sentences: list[dict],
     scene_plan: dict,
+    audio_duration: float | None = None,
 ) -> list[dict]:
     """
-    Group whole sentences into scenes using the real voice-over timing, honouring
-    the requested per-minute scene rate.
+    Group whole sentences into scenes using real voice-over timing.
 
-    • Sentences are bucketed into one-minute windows by their midpoint, so each
-      sentence lands in the minute it mostly plays in (natural boundary tolerance).
-    • Every minute is split into its target number of scenes (the selected rate,
-      capped at that minute's sentence count — we never split a sentence, so a
-      minute with fewer sentences than the rate simply yields fewer scenes).
-    • The LLM does the meaningful grouping; if a minute's result doesn't match the
-      required count exactly, that minute falls back to a deterministic
-      time-balanced split — guaranteeing the per-minute scene counts.
-    • Each scene's start/end comes directly from its sentences, so the timeline
-      matches the narration and the final scene ends exactly at the audio length.
+    • Sentences bucketed by calendar minute (by start_time).
+    • Each minute → exactly `target` scenes (rate capped by sentence count).
+    • Deterministic equal sentence-count split within each minute (no LLM).
+    • Scene start/end = first sentence start → last sentence end (exact span).
     """
+    del title  # reserved for future use; grouping is fully deterministic.
     sents = sorted(sentences, key=lambda s: int(s.get("sentence_index", 0)))
     if not sents:
         return []
 
-    plan = _build_minute_plan(sents, scene_plan)
+    duration = float(
+        audio_duration
+        if audio_duration is not None
+        else scene_plan.get("duration_seconds", 0)
+    )
+    if duration <= 0:
+        duration = float(sents[-1].get("end_time", 0))
 
-    try:
-        llm_by_minute = _llm_group_minutes(title, plan)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("LLM minute grouping unavailable: %s", exc)
-        llm_by_minute = None
+    plan = _build_minute_plan(sents, scene_plan, duration)
 
     final_groups: list[list[dict]] = []
-    fallback_minutes: list[int] = []
     for entry in plan:
-        groups = (llm_by_minute or {}).get(entry["minute"])
-        if _minute_groups_valid(groups, entry):
-            final_groups.extend(groups)  # type: ignore[arg-type]
-        else:
-            fallback_minutes.append(entry["minute"])
-            final_groups.extend(_partition_by_time(entry["sentences"], entry["target"]))
-
-    if fallback_minutes:
-        logger.info(
-            "Deterministic scene split used for %s/%s minute(s): %s",
-            len(fallback_minutes), len(plan), fallback_minutes,
-        )
+        final_groups.extend(_partition_sentences(entry["sentences"], entry["target"]))
 
     segments: list[dict] = []
     for num, group in enumerate(g for g in final_groups if g):
@@ -518,14 +386,20 @@ def build_scene_segments_from_sentences(
             {
                 "scene_number": scene_no,
                 "slot_number": scene_no,
-                "start_time": round(start_t, 2),
-                "end_time": round(end_t, 2),
-                "duration": round(end_t - start_t, 2),
+                "start_time": round(start_t, 3),
+                "end_time": round(end_t, 3),
+                "duration": round(end_t - start_t, 3),
                 "script_segment": text,
                 "word_count": sum(len(s["text"].split()) for s in group),
                 "sentence_indices": [int(s["sentence_index"]) for s in group],
             }
         )
+
+    segments = _normalize_segments(segments, duration)
+    logger.info(
+        "Built %s scenes from %s sentences across %s minute(s) (audio %.1fs).",
+        len(segments), len(sents), len(plan), duration,
+    )
     return segments
 
 
@@ -543,6 +417,40 @@ def _sanitize_scene_enrichment(row: dict, abstraction_enabled: bool) -> dict:
         out["scene_type"] = 2
         out["scene_type_name"] = SCENE_TYPE_NAMES.get(2, "Environmental Wide Shot")
     return out
+
+
+def _merge_locked_scenes(
+    pre_segments: list[dict],
+    llm_scenes: list[dict],
+    abstraction_enabled: bool,
+) -> list[dict]:
+    """Keep deterministic timing/script; take LLM enrichment fields only."""
+    by_num: dict[int, dict] = {}
+    for row in llm_scenes:
+        try:
+            n = int(row.get("scene_number") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            by_num[n] = row
+
+    merged: list[dict] = []
+    for pre in pre_segments:
+        n = int(pre["scene_number"])
+        enrich = by_num.get(n, {})
+        row = dict(enrich)
+        row["scene_number"] = pre["scene_number"]
+        row["slot_number"] = pre["slot_number"]
+        row["start_time"] = pre["start_time"]
+        row["end_time"] = pre["end_time"]
+        row["duration"] = pre["duration"]
+        row["script_segment"] = pre["script_segment"]
+        row["word_count"] = pre["word_count"]
+        if pre.get("sentence_indices") is not None:
+            row["sentence_indices"] = pre["sentence_indices"]
+        row = _sanitize_scene_enrichment(row, abstraction_enabled)
+        merged.append(row)
+    return merged
 
 
 def split_and_prompt(
@@ -575,24 +483,14 @@ def split_and_prompt(
     # slightly from the planned target), so the LLM is told the true number.
     scene_count = len(pre_segments)
 
-    # Compact list passed to the LLM: it must NOT change scene_number, timing or text.
-    locked_payload = [
-        {
-            "scene_number": p["scene_number"],
-            "start_time": p["start_time"],
-            "end_time": p["end_time"],
-            "duration": p["duration"],
-            "script_segment": p["script_segment"],
-        }
-        for p in pre_segments
-    ]
-
     system_prompt = build_scene_split_system_prompt(
         scene_count=scene_count,
         duration_minutes=duration_minutes,
         duration_seconds=duration_seconds,
         abstraction_enabled=abstraction_enabled,
     )
+
+    client = _get_client()
 
     literal_note = ""
     if not abstraction_enabled:
@@ -603,78 +501,85 @@ def split_and_prompt(
             "Depict concrete real-world subjects only.\n"
         )
 
-    user_msg = (
-        f"VIDEO TITLE: {title}\n"
-        f"TOTAL DURATION: {duration_minutes:.2f} minutes ({duration_seconds:.0f} seconds)\n"
-        f"SCENE COUNT: {scene_count}\n\n"
-        "IMPORTANT: The script has already been split into equally-sized scenes. "
-        "Do NOT change scene_number, start_time, end_time, duration, or script_segment. "
-        "Return them verbatim. Your job is to add the documentary classification and "
-        "Tatterveil image prompt for each scene.\n"
-        f"{literal_note}\n"
-        f"LOCKED SCENES (use exactly these segments and timings):\n"
-        f"{json.dumps(locked_payload, ensure_ascii=False)}\n\n"
-        f"FULL SCRIPT (context only — for tone / continuity):\n{script.strip()}"
-    )
+    batch_size = max(1, int(config.PROMPT_BATCH_SIZE))
+    batches = [
+        pre_segments[i:i + batch_size]
+        for i in range(0, len(pre_segments), batch_size)
+    ]
+    all_merged: list[dict] = []
 
-    client = _get_client()
-
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            response = client.chat.completions.create(
-                model=config.TEXT_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_msg},
-                ],
-                temperature=0.25,
-                response_format={"type": "json_object"},
-            )
-            raw = response.choices[0].message.content or ""
-            llm_scenes = _robust_parse(raw)
-            logger.info(
-                "LLM returned %s enriched scenes (locked %s)",
-                len(llm_scenes), len(pre_segments),
+    for batch_idx, batch in enumerate(batches):
+        locked_payload = [
+            {
+                "scene_number": p["scene_number"],
+                "start_time": p["start_time"],
+                "end_time": p["end_time"],
+                "duration": p["duration"],
+                "script_segment": p["script_segment"],
+            }
+            for p in batch
+        ]
+        batch_note = ""
+        if len(batches) > 1:
+            batch_note = (
+                f"\nBATCH {batch_idx + 1} of {len(batches)} — enrich ONLY the "
+                f"{len(batch)} scenes listed below (scene numbers are global).\n"
             )
 
-            # Merge: keep pre-computed timing + script_segment, take enrichment from LLM.
-            by_num: dict[int, dict] = {}
-            for row in llm_scenes:
-                try:
-                    n = int(row.get("scene_number") or 0)
-                except (TypeError, ValueError):
-                    n = 0
-                if n > 0:
-                    by_num[n] = row
+        user_msg = (
+            f"VIDEO TITLE: {title}\n"
+            f"TOTAL DURATION: {duration_minutes:.2f} minutes ({duration_seconds:.0f} seconds)\n"
+            f"SCENE COUNT (entire video): {scene_count}\n"
+            f"{batch_note}\n"
+            "IMPORTANT: Scenes are already split on whole script sentences with exact "
+            "voice-over timestamps. Do NOT change scene_number, start_time, end_time, "
+            "duration, or script_segment. Return them verbatim. Your job is to add the "
+            "documentary classification and Tatterveil image prompt for each scene.\n"
+            f"{literal_note}\n"
+            f"LOCKED SCENES (use exactly these segments and timings):\n"
+            f"{json.dumps(locked_payload, ensure_ascii=False)}\n\n"
+            f"FULL SCRIPT (context only — for tone / continuity):\n{script.strip()}"
+        )
 
-            merged: list[dict] = []
-            for pre in pre_segments:
-                n = int(pre["scene_number"])
-                enrich = by_num.get(n, {})
-                row = dict(enrich)
-                # Locked fields always come from the deterministic split.
-                row["scene_number"] = pre["scene_number"]
-                row["slot_number"]  = pre["slot_number"]
-                row["start_time"]   = pre["start_time"]
-                row["end_time"]     = pre["end_time"]
-                row["duration"]     = pre["duration"]
-                row["script_segment"] = pre["script_segment"]
-                row["word_count"]   = pre["word_count"]
-                if pre.get("sentence_indices") is not None:
-                    row["sentence_indices"] = pre["sentence_indices"]
-                row = _sanitize_scene_enrichment(row, abstraction_enabled)
-                merged.append(row)
-            return merged
+        batch_merged: list[dict] | None = None
+        for attempt in range(config.MAX_RETRIES):
+            try:
+                response = client.chat.completions.create(
+                    model=config.TEXT_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.25,
+                    response_format={"type": "json_object"},
+                )
+                raw = response.choices[0].message.content or ""
+                llm_scenes = _robust_parse(raw)
+                logger.info(
+                    "LLM batch %s/%s returned %s enriched scenes (locked %s)",
+                    batch_idx + 1, len(batches), len(llm_scenes), len(batch),
+                )
+                batch_merged = _merge_locked_scenes(batch, llm_scenes, abstraction_enabled)
+                break
+            except Exception as exc:
+                if is_moderation_error(exc):
+                    logger.error("Scene-prompt generation blocked by safety system: %s", exc)
+                    raise ContentModerationError(original=exc) from exc
+                logger.warning(
+                    "LLM batch %s attempt %s/%s failed: %s",
+                    batch_idx + 1, attempt + 1, config.MAX_RETRIES, exc,
+                )
+                if attempt < config.MAX_RETRIES - 1:
+                    time.sleep(config.RETRY_DELAY * (attempt + 1))
 
-        except Exception as exc:
-            if is_moderation_error(exc):
-                logger.error("Scene-prompt generation blocked by safety system: %s", exc)
-                raise ContentModerationError(original=exc) from exc
-            logger.warning(f"LLM attempt {attempt + 1}/{config.MAX_RETRIES} failed: {exc}")
-            if attempt < config.MAX_RETRIES - 1:
-                time.sleep(config.RETRY_DELAY * (attempt + 1))
+        if batch_merged is None:
+            raise RuntimeError(
+                f"LLM failed to generate scene prompts for batch {batch_idx + 1} "
+                f"after all retries."
+            )
+        all_merged.extend(batch_merged)
 
-    raise RuntimeError("LLM failed to generate scene prompts after all retries.")
+    return all_merged
 
 
 # ─── 4. Image generation ──────────────────────────────────────────────────────
@@ -706,12 +611,18 @@ def generate_image(
     quality: str,
     resolution: str,
     project_dir: Path,
+    *,
+    auto_rephrase_on_moderation: bool = False,
 ) -> tuple[Path, float]:
     """
     Generate one scene image via gpt-image-2.
 
     Returns (output_path, elapsed_seconds). Retries up to MAX_RETRIES on
     transient errors with exponential back-off.
+
+    When auto_rephrase_on_moderation is True (initial project generation), a
+    safety block triggers up to IMAGE_MODERATION_RETRIES LLM rewrites before
+    surfacing the friendly moderation error to the UI.
     """
     images_dir = project_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -724,62 +635,85 @@ def generate_image(
     if quality not in config.QUALITY_OPTIONS:
         quality = config.DEFAULT_QUALITY
 
-    prompt = _build_final_prompt(scene)
     client = _get_client()
-
     started_at = time.monotonic()
-    last_exc: Exception | None = None
+    safety_rephrases = 0
 
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            attempt_start = time.monotonic()
-            response = client.images.generate(
-                model=config.IMAGE_MODEL,
-                prompt=prompt,
-                n=1,
-                size=resolution,
-                quality=quality,
-            )
-            image_b64   = response.data[0].b64_json
-            image_bytes = base64.b64decode(image_b64)
-            out_path.write_bytes(image_bytes)
+    while True:
+        prompt = _build_final_prompt(scene)
+        last_exc: Exception | None = None
+        rephrase_requested = False
 
+        for attempt in range(config.MAX_RETRIES):
             try:
-                from engine.thumbnails import ensure_thumbnail
-
-                ensure_thumbnail(out_path)
-            except Exception as exc:
-                logger.warning("Preview thumbnail failed for %s: %s", out_path.name, exc)
-
-            elapsed       = time.monotonic() - started_at
-            attempt_time  = time.monotonic() - attempt_start
-            logger.info(
-                f"Scene {scene_num:03d} saved → {out_path.name}  "
-                f"({attempt_time:.1f}s, {resolution}, q={quality})"
-            )
-            return out_path, elapsed
-
-        except Exception as exc:
-            last_exc = exc
-            if is_moderation_error(exc):
-                # Retrying the same prompt won't pass moderation — fail fast.
-                logger.error(
-                    "Scene %s image blocked by safety system: %s", scene_num, exc
+                attempt_start = time.monotonic()
+                response = client.images.generate(
+                    model=config.IMAGE_MODEL,
+                    prompt=prompt,
+                    n=1,
+                    size=resolution,
+                    quality=quality,
                 )
-                raise ContentModerationError(
-                    MODERATION_SCENE_MESSAGE, original=exc
-                ) from exc
-            logger.warning(
-                f"Image attempt {attempt + 1}/{config.MAX_RETRIES} "
-                f"for scene {scene_num} failed: {exc}"
-            )
-            if attempt < config.MAX_RETRIES - 1:
-                time.sleep(config.RETRY_DELAY * (attempt + 1))
+                image_b64 = response.data[0].b64_json
+                image_bytes = base64.b64decode(image_b64)
+                out_path.write_bytes(image_bytes)
 
-    raise RuntimeError(
-        f"Image generation failed for scene {scene_num} after "
-        f"{config.MAX_RETRIES} attempts: {last_exc}"
-    )
+                try:
+                    from engine.thumbnails import ensure_thumbnail
+
+                    ensure_thumbnail(out_path)
+                except Exception as exc:
+                    logger.warning("Preview thumbnail failed for %s: %s", out_path.name, exc)
+
+                elapsed = time.monotonic() - started_at
+                attempt_time = time.monotonic() - attempt_start
+                logger.info(
+                    f"Scene {scene_num:03d} saved → {out_path.name}  "
+                    f"({attempt_time:.1f}s, {resolution}, q={quality})"
+                )
+                return out_path, elapsed
+
+            except Exception as exc:
+                last_exc = exc
+                if is_moderation_error(exc):
+                    if (
+                        auto_rephrase_on_moderation
+                        and safety_rephrases < config.IMAGE_MODERATION_RETRIES
+                    ):
+                        safety_rephrases += 1
+                        logger.info(
+                            "Scene %s blocked by safety — auto-rephrase %s/%s",
+                            scene_num,
+                            safety_rephrases,
+                            config.IMAGE_MODERATION_RETRIES,
+                        )
+                        new_pos, new_neg = rephrase_prompt_for_safety(
+                            scene, safety_rephrases
+                        )
+                        scene["prompt"] = new_pos
+                        scene["negative_prompt"] = new_neg
+                        rephrase_requested = True
+                        break
+                    logger.error(
+                        "Scene %s image blocked by safety system: %s", scene_num, exc
+                    )
+                    raise ContentModerationError(
+                        MODERATION_SCENE_MESSAGE, original=exc
+                    ) from exc
+                logger.warning(
+                    f"Image attempt {attempt + 1}/{config.MAX_RETRIES} "
+                    f"for scene {scene_num} failed: {exc}"
+                )
+                if attempt < config.MAX_RETRIES - 1:
+                    time.sleep(config.RETRY_DELAY * (attempt + 1))
+
+        if rephrase_requested:
+            continue
+
+        raise RuntimeError(
+            f"Image generation failed for scene {scene_num} after "
+            f"{config.MAX_RETRIES} attempts: {last_exc}"
+        )
 
 
 def generate_all_images(
@@ -788,6 +722,8 @@ def generate_all_images(
     resolution: str,
     project_dir: Path,
     on_progress: Callable[[int, int, dict], None] | None = None,
+    *,
+    auto_rephrase_on_moderation: bool = False,
 ) -> tuple[list[dict], dict]:
     """
     Generate images for all scenes in parallel.
@@ -808,7 +744,14 @@ def generate_all_images(
 
     with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
         future_to_eid = {
-            pool.submit(generate_image, scene, quality, resolution, project_dir):
+            pool.submit(
+                generate_image,
+                scene,
+                quality,
+                resolution,
+                project_dir,
+                auto_rephrase_on_moderation=auto_rephrase_on_moderation,
+            ):
                 scene["entry_id"]
             for scene in scenes
         }
@@ -873,6 +816,68 @@ def generate_all_images(
 
 
 # ─── 5. Prompt refinement (regenerate image) ─────────────────────────────────
+
+SAFETY_REPHRASE_SYSTEM = """You revise image-generation prompts that were blocked by an AI safety filter.
+
+The user provides the script lines for one documentary scene plus the prompt that was rejected.
+
+Return JSON:
+  "prompt": string — full revised positive prompt (at least ~80 words), same Tatterveil atmospheric photorealistic documentary look, period, and composition intent.
+  "negative_prompt": string or null — revised negative constraints.
+
+Rules:
+- Remove or soften wording that could trigger moderation (graphic violence, explicit content, inflammatory depictions stated bluntly).
+- Keep 16:9 landscape photorealistic documentary language; no watermarks; no text in image.
+- Do not change the historical/subject focus unless required for safety.
+- Each rewrite attempt should use noticeably different phrasing than the previous prompt.
+"""
+
+
+def rephrase_prompt_for_safety(scene: dict, attempt: int) -> tuple[str, str | None]:
+    """Rewrite an image prompt so it is less likely to trip OpenAI safety filters."""
+    client = _get_client()
+    payload = {
+        "attempt": attempt,
+        "script_segment": scene.get("script_segment") or "",
+        "prompt": scene.get("prompt") or "",
+        "negative_prompt": scene.get("negative_prompt") or "",
+        "instruction": (
+            "Rewrite the prompt to pass content moderation while preserving the "
+            "documentary scene intent. Use neutral, archival, atmospheric wording."
+        ),
+    }
+    for try_no in range(config.MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=config.TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": SAFETY_REPHRASE_SYSTEM},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.45 + (attempt - 1) * 0.1,
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content or "{}"
+            data = json.loads(raw)
+            pos = (data.get("prompt") or "").strip()
+            neg = data.get("negative_prompt")
+            if isinstance(neg, str):
+                neg = neg.strip() or None
+            else:
+                neg = None
+            if not pos:
+                raise ValueError("empty prompt from safety rephrase")
+            return pos, neg
+        except Exception as exc:
+            if is_moderation_error(exc):
+                raise ContentModerationError(
+                    MODERATION_SCENE_MESSAGE, original=exc
+                ) from exc
+            logger.warning("rephrase_prompt_for_safety attempt %s failed: %s", try_no + 1, exc)
+            if try_no < config.MAX_RETRIES - 1:
+                time.sleep(config.RETRY_DELAY * (try_no + 1))
+    raise RuntimeError("LLM failed to rephrase prompt for safety after retries.")
+
 
 REFINE_PROMPT_SYSTEM = """You revise image-generation prompts for a documentary-style YouTube visual pipeline.
 
