@@ -39,14 +39,11 @@ OPENAI_API_KEY=sk-...
 ELEVEN_API_KEY=<your-elevenlabs-key>    # optional — leave blank to skip voice-overs
 ```
 
-When `ELEVEN_API_KEY` is set, the whole script is narrated as **one combined audio file** (`full_voiceover.wav`) rendered with
-ElevenLabs (`eleven_multilingual_v2`, speed 1.0, voice `VuLPiW02W0Qm8465ksBZ`).
-The script is chunked under ElevenLabs' 10k-character limit, each chunk is
-generated with a fixed seed for a consistent voice, and the chunks are stitched
-into one WAV. **The measured audio length becomes the real video duration**,
-which then drives how the script is split into scenes. The combined WAV plays on
-the project page and is bundled in the final ZIP export alongside the per-scene
-MP4s.
+When `ELEVEN_API_KEY` is set, the whole script is narrated as **one combined WAV** (`full_voiceover.wav`) using
+ElevenLabs **`eleven_v3`** with the **`/with-timestamps`** API. Sentence-level timestamps come directly from
+ElevenLabs character alignment — no Whisper STT. The measured audio length drives scene splitting.
+Voice settings: `stability=0.75`, `similarity_boost=0.85`, `style=0.35`; narration **speed** is user-selected (0.25–1.0).
+ffmpeg is required to merge MP3 chunks and convert to WAV.
 
 ---
 
@@ -65,8 +62,8 @@ YT-video/
 │   ├── scene_utils.py   Stable `entry_id`s, PNG/MP3 filenames, duplicate-slot detection
 │   ├── style_guide.py   Full Tatterveil style guide encoded as Python constants
 │   │                    + the LLM system prompt used for scene splitting
-│   ├── pipeline.py      Core generation engine (deterministic equal-word split + prompts + images)
-│   └── voice.py         ElevenLabs voice-over (chunk script → combined WAV → measured duration)
+│   ├── pipeline.py      Core generation engine (scene grouping + prompts + images + safety retry)
+│   └── voice.py         ElevenLabs /with-timestamps → combined WAV + sentence timeline
 │
 ├── templates/
 │   ├── layout.html      Base template (nav, toast notifications)

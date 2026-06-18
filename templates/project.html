@@ -425,9 +425,6 @@
                 {{ scene_type_names.get(s.scene_type, 'Unknown') }}
               </span>
               <span class="scene-period-tag">{{ period_labels.get(s.time_period, s.time_period) }}</span>
-              {% if s.abstraction_mode %}
-                <span class="scene-abstract-tag">Abstract Mode</span>
-              {% endif %}
               {% if s.image_seconds %}
                 <span class="scene-time-tag">{{ "%.1f"|format(s.image_seconds) }}s</span>
               {% endif %}
@@ -462,7 +459,9 @@
 
             <div class="scene-card-actions">
               <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="{{ s.entry_id }}" {% if s.image_status != 'done' %}disabled{% endif %}>Regenerate</button>
-              <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}">Delete variant</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="{{ s.entry_id }}"
+                {% set slot = s.slot_number or s.scene_number %}
+                {% if slot_variant_counts.get(slot, 1) <= 1 %}disabled title="Cannot delete the only image for this scene slot"{% else %}title="Remove this variant"{% endif %}>Delete variant</button>
             </div>
 
             <details class="scene-prompt-details">

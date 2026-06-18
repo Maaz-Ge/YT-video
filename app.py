@@ -2,6 +2,7 @@
 Tatterveil Scene Studio — Flask application.
 """
 
+import hashlib
 import io
 import json
 import logging
@@ -28,13 +29,14 @@ from flask import (
 import config
 from engine import pipeline, voice as voice_engine
 from engine import thumbnails
-from engine import transcribe as transcribe_engine
 from engine.scene_utils import (
+    count_variants_for_slot,
     duplicate_slot_numbers,
     ensure_scene_entries,
     find_entry,
     image_filename_for_scene,
     next_variant_index,
+    promote_variants_after_delete,
     sort_scenes_for_display,
 )
 from engine.style_guide import SCENE_TYPE_COLORS, SCENE_TYPE_NAMES, PERIOD_LABELS
@@ -227,7 +229,6 @@ ACTIVE_GENERATION_STEPS = frozenset({
     "prompting_done",
     "generating",
     "voicing",
-    "transcribing",
 })
 
 
@@ -320,124 +321,90 @@ def _run_generation(project_id: str, meta: dict) -> None:
         script = meta["script"]
         timing_log["analyse_seconds"] = round(time.monotonic() - step_start, 2)
 
-        # ── Step 2: Generate the full voice-over FIRST ───────────────────────
-        # The measured audio length is the real video duration that drives the
-        # scene split (so scenes line up with the spoken narration).
+        # ── Step 2: Voice-over + sentence timestamps (ElevenLabs) ────────────
         voice_start = time.monotonic()
-        voiceover_info: dict
-        if config.ELEVEN_API_KEY:
-            chunks = voice_engine.chunk_script(script, config.VOICE_MAX_CHARS)
-            total_chunks = max(1, len(chunks))
+        sentence_timeline: dict | None = None
+
+        if not config.ELEVEN_API_KEY:
+            raise RuntimeError(
+                "ELEVEN_API_KEY is not configured — voice-over and timestamps are required."
+            )
+
+        chunks = voice_engine.chunk_script(script)
+        total_chunks = max(1, len(chunks))
+        _set_state(
+            project_id, step="voicing", progress=8,
+            message=f"Generating voice-over + timestamps "
+                    f"({total_chunks} chunk{'s' if total_chunks != 1 else ''})…",
+            voice_total=total_chunks, voice_done=0,
+        )
+
+        def on_voice_progress(done: int, total: int) -> None:
+            pct = 8 + int(done / max(1, total) * 32)  # 8 → 40
             _set_state(
-                project_id, step="voicing", progress=8,
-                message=f"Generating voice-over for the full script "
-                        f"({total_chunks} chunk{'s' if total_chunks != 1 else ''})…",
-                voice_total=total_chunks, voice_done=0,
+                project_id, step="voicing", progress=min(40, pct),
+                message=f"Voice chunk {done} of {total} (audio + timestamps)…",
+                voice_total=total, voice_done=done,
             )
 
-            def on_voice_progress(done: int, total: int) -> None:
-                pct = 8 + int(done / max(1, total) * 27)  # 8 → 35
-                _set_state(
-                    project_id, step="voicing", progress=min(35, pct),
-                    message=f"Generated voice chunk {done} of {total}…",
-                    voice_total=total, voice_done=done,
-                )
-
-            try:
-                voiceover_info = voice_engine.generate_full_voiceover(
-                    script=script,
-                    project_dir=project_dir,
-                    speed=_parse_voice_speed(meta.get("voice_speed")),
-                    on_progress=on_voice_progress,
-                )
-                duration = max(
-                    voiceover_info["duration_seconds"] / 60.0, config.MIN_DURATION
-                )
-                logger.info(
-                    "Voice-over duration %.1fs → %.2f min (drives scene plan).",
-                    voiceover_info["duration_seconds"], duration,
-                )
-            except Exception as exc:
-                logger.error("Voice-over generation failed: %s", exc, exc_info=True)
-                voiceover_info = {"status": "error", "error": str(exc)}
-                duration = pipeline.estimate_duration(
-                    script, _parse_voice_speed(meta.get("voice_speed"))
-                )
-        else:
-            logger.info("ELEVEN_API_KEY not set — skipping voice-over generation.")
-            voiceover_info = {
-                "status": "skipped",
-                "error": "ELEVEN_API_KEY not configured",
-            }
-            duration = pipeline.estimate_duration(
-                script, _parse_voice_speed(meta.get("voice_speed"))
-            )
+        voiceover_info = voice_engine.generate_voice_with_timestamps(
+            script=script,
+            project_dir=project_dir,
+            speed=_parse_voice_speed(meta.get("voice_speed")),
+            on_progress=on_voice_progress,
+        )
+        duration = max(
+            voiceover_info["duration_seconds"] / 60.0, config.MIN_DURATION
+        )
+        sentence_timeline = {
+            "source": "elevenlabs_timestamps",
+            "model_id": voiceover_info.get("model_id"),
+            "sentence_count": voiceover_info.get("sentence_count"),
+            "audio_duration_seconds": voiceover_info.get("duration_seconds"),
+            "sentences": voiceover_info.get("sentences") or [],
+        }
+        meta["sentence_timeline"] = {
+            "source": "elevenlabs_timestamps",
+            "model_id": voiceover_info.get("model_id"),
+            "sentence_count": sentence_timeline.get("sentence_count"),
+            "audio_duration_seconds": sentence_timeline.get("audio_duration_seconds"),
+        }
+        logger.info(
+            "Voice + timestamps: %.1fs → %.2f min, %s sentences.",
+            voiceover_info["duration_seconds"], duration,
+            sentence_timeline.get("sentence_count"),
+        )
 
         meta["voiceover"] = voiceover_info
         timing_log["voice_seconds"] = round(time.monotonic() - voice_start, 2)
 
-        # ── Step 3: Transcribe the voice-over → per-sentence timeline ─────────
-        # STT gives each sentence its real start/end time so scenes can be split
-        # on whole sentences that line up with the spoken narration. We keep the
-        # ORIGINAL script text (STT output is used only for timing).
-        sentence_timeline: dict | None = None
-        if voiceover_info.get("status") == "done" and config.OPENAI_API_KEY:
-            stt_start = time.monotonic()
-            _set_state(project_id, step="transcribing", progress=37,
-                       message="Transcribing voice-over to time each sentence…")
-            try:
-                wav_path = project_dir / str(voiceover_info["path"]).replace("\\", "/")
-                sentence_timeline = transcribe_engine.build_sentence_timeline(
-                    script=script, wav_path=wav_path,
-                )
-                (project_dir / "sentence_timeline.json").write_text(
-                    json.dumps(sentence_timeline, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                meta["sentence_timeline"] = {
-                    "source": "stt",
-                    "stt_model": sentence_timeline.get("stt_model"),
-                    "sentence_count": sentence_timeline.get("sentence_count"),
-                    "audio_duration_seconds": sentence_timeline.get("audio_duration_seconds"),
-                }
-                logger.info(
-                    "Sentence timeline ready: %s sentences.",
-                    sentence_timeline.get("sentence_count"),
-                )
-            except Exception as exc:
-                logger.error("Sentence timeline (STT) failed: %s", exc, exc_info=True)
-                sentence_timeline = None
-            timing_log["stt_seconds"] = round(time.monotonic() - stt_start, 2)
-
-        # ── Step 4: Compute scene plan from the actual duration ──────────────
+        # ── Step 3: Compute scene plan from the actual duration ──────────────
         scene_plan = pipeline.compute_scene_plan(
             duration=duration,
             first_rate=meta["first_rate"],
             rest_rate=meta["rest_rate"],
         )
 
-        # ── Step 5: Build scene segments ─────────────────────────────────────
-        # Preferred: logical grouping of whole sentences (timestamps from STT).
-        # Fallback: the legacy equal-word split when STT is unavailable.
-        pre_segments = None
-        if sentence_timeline and sentence_timeline.get("sentences"):
-            try:
-                pre_segments = pipeline.build_scene_segments_from_sentences(
-                    title=meta["name"],
-                    sentences=sentence_timeline["sentences"],
-                    scene_plan=scene_plan,
-                )
-            except Exception as exc:
-                logger.error("Sentence-based grouping failed: %s", exc, exc_info=True)
-                pre_segments = None
+        # ── Step 4: Build scene segments from sentence timeline ───────────────
+        if not sentence_timeline.get("sentences"):
+            raise RuntimeError(
+                "No sentence timestamps were produced — cannot split scenes."
+            )
 
-        # When grouping succeeded, the real scene count drives the plan + cost.
-        if pre_segments:
-            boundary = float(scene_plan.get("first_segment_minutes", 0) or 0) * 60.0
-            first_n = sum(1 for s in pre_segments if float(s["start_time"]) < boundary)
-            scene_plan["first_segment_scenes"] = first_n
-            scene_plan["rest_segment_scenes"] = len(pre_segments) - first_n
-            scene_plan["total_scenes"] = len(pre_segments)
+        pre_segments = pipeline.build_scene_segments_from_sentences(
+            title=meta["name"],
+            sentences=sentence_timeline["sentences"],
+            scene_plan=scene_plan,
+            audio_duration=voiceover_info.get("duration_seconds"),
+        )
+        if not pre_segments:
+            raise RuntimeError("Sentence-based scene grouping produced no scenes.")
+
+        boundary = float(scene_plan.get("first_segment_minutes", 0) or 0) * 60.0
+        first_n = sum(1 for s in pre_segments if float(s["start_time"]) < boundary)
+        scene_plan["first_segment_scenes"] = first_n
+        scene_plan["rest_segment_scenes"] = len(pre_segments) - first_n
+        scene_plan["total_scenes"] = len(pre_segments)
 
         meta["scene_plan"] = scene_plan
         meta["cost_estimate"] = _estimate_cost(
@@ -447,12 +414,14 @@ def _run_generation(project_id: str, meta: dict) -> None:
             scene_plan.get("duration_minutes", 0),
         )
         _meta_path(project_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        _set_state(project_id, step="transcribing", progress=42,
-                   message=f"Voice-over is ~{duration:.1f} min → "
-                           f"{scene_plan['total_scenes']} scenes planned",
-                   scene_plan=scene_plan)
+        _set_state(
+            project_id, step="voicing", progress=42,
+            message=f"Voice-over is ~{duration:.1f} min → "
+                    f"{scene_plan['total_scenes']} scenes planned",
+            scene_plan=scene_plan,
+        )
 
-        # ── Step 6: Enrich each scene + generate prompts ─────────────────────
+        # ── Step 5: Enrich each scene + generate prompts ─────────────────────
         step_start = time.monotonic()
         _set_state(project_id, step="prompting", progress=44,
                    message="Generating visual prompts for each scene…")
@@ -547,10 +516,25 @@ def _run_generation(project_id: str, meta: dict) -> None:
         )
         logger.info(f"Project {project_id} completed — {total} scenes.")
 
+    except pipeline.ContentPolicyError as exc:
+        logger.error("Project %s content policy: %s", project_id, exc, exc_info=True)
+        _set_state(
+            project_id,
+            step="error",
+            progress=0,
+            error_code="content_policy_script",
+            message=str(exc),
+        )
     except Exception as exc:
         logger.error(f"Project {project_id} failed: {exc}", exc_info=True)
-        _set_state(project_id, step="error", progress=0,
-                   message=f"Generation failed: {exc}")
+        error_code = "voice_failed" if "ElevenLabs" in str(exc) or "voice" in str(exc).lower() else "generation_failed"
+        _set_state(
+            project_id,
+            step="error",
+            progress=0,
+            error_code=error_code,
+            message=f"Generation failed: {exc}",
+        )
 
 
 # ─── Export & regenerate helpers ──────────────────────────────────────────────
@@ -565,6 +549,24 @@ class ExportBlockedError(Exception):
 
 def _which_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
+
+
+def _export_cache_dir(project_dir: Path) -> Path:
+    cache = project_dir / "export_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
+
+
+def _scene_mp4_cache_key(scene: dict, image_path: Path) -> str:
+    st = image_path.stat()
+    slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
+    dur = float(scene.get("duration") or 0.0)
+    if dur <= 0:
+        dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+    return (
+        f"{slot:03d}|{image_path.name}|{st.st_mtime_ns}|{st.st_size}|"
+        f"{round(dur, 3):.3f}"
+    )
 
 
 def _image_to_mp4(image_path: Path, out_mp4: Path, duration_sec: float) -> None:
@@ -583,12 +585,20 @@ def _image_to_mp4(image_path: Path, out_mp4: Path, duration_sec: float) -> None:
         str(image_path),
         "-c:v",
         "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "stillimage",
+        "-crf",
+        "28",
         "-t",
         str(dur),
         "-pix_fmt",
         "yuv420p",
         "-vf",
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=1",
+        "-movflags",
+        "+faststart",
         str(out_mp4),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -597,38 +607,216 @@ def _image_to_mp4(image_path: Path, out_mp4: Path, duration_sec: float) -> None:
         raise RuntimeError(msg)
 
 
+def _cached_scene_mp4(
+    scene: dict,
+    project_dir: Path,
+    cache_dir: Path,
+) -> tuple[str, Path]:
+    """Return (zip arcname, mp4 path), reusing export_cache when the scene is unchanged."""
+    slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
+    if scene.get("image_status") != "done":
+        raise RuntimeError(
+            f"Scene slot {slot} has no completed image; finish or remove failed rows first."
+        )
+    rel = str(scene.get("image_path", "")).replace("\\", "/")
+    image_path = project_dir / rel
+    if not image_path.exists():
+        raise RuntimeError(f"Missing image for slot {slot:03d}: {image_path.name}")
+
+    dur = float(scene.get("duration") or 0.0)
+    if dur <= 0:
+        dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+
+    mp4_name = f"scene_{slot:03d}.mp4"
+    arcname = f"scenes/{mp4_name}"
+    cache_mp4 = cache_dir / mp4_name
+    cache_key_path = cache_dir / f"{mp4_name}.key"
+    cache_key = _scene_mp4_cache_key(scene, image_path)
+
+    if (
+        cache_mp4.exists()
+        and cache_key_path.exists()
+        and cache_key_path.read_text(encoding="utf-8").strip() == cache_key
+    ):
+        return arcname, cache_mp4
+
+    _image_to_mp4(image_path, cache_mp4, dur)
+    cache_key_path.write_text(cache_key, encoding="utf-8")
+    return arcname, cache_mp4
+
+
+def _export_fingerprint(project_dir: Path, ordered: list[dict], meta: dict) -> str:
+    parts: list[str] = []
+    for scene in ordered:
+        slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
+        rel = str(scene.get("image_path", "")).replace("\\", "/")
+        image_path = project_dir / rel
+        if image_path.exists():
+            parts.append(_scene_mp4_cache_key(scene, image_path))
+        else:
+            parts.append(f"{slot}|missing")
+    voiceover = meta.get("voiceover") or {}
+    vo_rel = str(voiceover.get("path") or "").replace("\\", "/")
+    vo_src = project_dir / vo_rel if vo_rel else None
+    if vo_src and vo_src.exists():
+        st = vo_src.stat()
+        parts.append(f"vo|{vo_rel}|{st.st_mtime_ns}|{st.st_size}")
+    parts.append("export_fmt=v2_text_only")
+    for name in ("sentence_timeline.json", "scenes.json", "meta.json", "timing.json"):
+        p = project_dir / name
+        if p.exists():
+            st = p.stat()
+            parts.append(f"{name}|{st.st_mtime_ns}|{st.st_size}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:20]
+
+
+def _voiceover_export_paths(
+    project_dir: Path, meta: dict
+) -> tuple[Path | None, str]:
+    voiceover = meta.get("voiceover") or {}
+    vo_rel = str(voiceover.get("path") or "").replace("\\", "/")
+    if voiceover.get("status") != "done" or not vo_rel:
+        return None, ""
+    vo_src = project_dir / vo_rel
+    if not vo_src.exists():
+        return None, ""
+    arcname = f"voiceovers/{voiceover.get('filename') or 'full_voiceover.wav'}"
+    return vo_src, arcname
+
+
+def _build_export_meta_text(
+    meta: dict,
+    timing: dict | None,
+    ordered: list[dict],
+    exported_at: float,
+) -> str:
+    """Plain-text project metadata for the export ZIP (no JSON)."""
+    lines: list[str] = [
+        "Tatterveil Scene Studio — Export Metadata",
+        "=" * 44,
+        f"Project: {meta.get('name', '')}",
+        f"Project ID: {meta.get('id', '')}",
+        f"Exported: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(exported_at))}",
+        "",
+        "Video settings",
+        f"  Style: {meta.get('style', '')}",
+        f"  Resolution: {meta.get('resolution', '')}",
+        f"  Quality: {meta.get('quality', '')}",
+        f"  Aspect ratio: {meta.get('aspect_ratio', '')}",
+        "",
+    ]
+
+    plan = meta.get("scene_plan") or {}
+    if plan:
+        lines.extend(
+            [
+                "Scene plan",
+                f"  Duration: {plan.get('duration_minutes', '')} min "
+                f"({plan.get('duration_seconds', '')} s)",
+                f"  First {plan.get('first_segment_minutes', config.FIRST_SEGMENT)} min: "
+                f"{plan.get('first_rate', '')} scenes/min",
+                f"  After: {plan.get('rest_rate', '')} scenes/min",
+                f"  Total scenes: {plan.get('total_scenes', len(ordered))}",
+                "",
+            ]
+        )
+
+    voiceover = meta.get("voiceover") or {}
+    if voiceover.get("status") == "done":
+        lines.extend(
+            [
+                "Voice-over",
+                f"  File: voiceovers/{voiceover.get('filename') or 'full_voiceover.wav'}",
+                f"  Duration: {float(voiceover.get('duration_seconds', 0)):.2f} s",
+                f"  Model: {voiceover.get('model_id', '')}",
+                f"  Speed: {voiceover.get('speed', '')}",
+                "",
+            ]
+        )
+
+    st = meta.get("sentence_timeline") or {}
+    if st:
+        lines.extend(
+            [
+                "Sentence timeline (source)",
+                f"  Sentences: {st.get('sentence_count', '')}",
+                f"  Audio duration: {st.get('audio_duration_seconds', '')} s",
+                "",
+            ]
+        )
+
+    if timing:
+        lines.extend(
+            [
+                "Timing estimate",
+                f"  Chars per minute: {timing.get('chars_per_minute', '')}",
+                f"  Estimated minutes: {timing.get('estimated_minutes', '')}",
+                "",
+            ]
+        )
+
+    lines.append("Scenes")
+    lines.append("-" * 44)
+    for scene in ordered:
+        slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
+        start = float(scene.get("start_time", 0))
+        end = float(scene.get("end_time", 0))
+        dur = float(scene.get("duration") or max(0.0, end - start))
+        wc = int(scene.get("word_count") or 0)
+        stype = scene.get("scene_type_name") or scene.get("scene_type") or ""
+        script = str(scene.get("script_segment") or "").strip().replace("\n", " ")
+        if len(script) > 200:
+            script = script[:197] + "..."
+        lines.append(
+            f"Scene {slot:03d} | {start:.2f}s – {end:.2f}s ({dur:.2f}s) | "
+            f"{wc} words | {stype}"
+        )
+        if script:
+            lines.append(f"  {script}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_export_zip(
+    zip_path: Path,
+    *,
+    manifest_path: Path,
+    meta_txt_path: Path,
+    mp4_jobs: list[tuple[str, Path]],
+    vo_src: Path | None,
+    vo_arcname: str,
+) -> None:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.write(manifest_path, arcname="scene_timestamps.txt")
+        zf.write(meta_txt_path, arcname="project_meta.txt")
+        for arcname, pth in sorted(mp4_jobs, key=lambda x: x[0]):
+            zf.write(pth, arcname=arcname, compress_type=zipfile.ZIP_STORED)
+        if vo_src is not None and vo_arcname:
+            zf.write(vo_src, arcname=vo_arcname, compress_type=zipfile.ZIP_STORED)
+
+
 def _parallel_render_export_mp4s(
     ordered: list[dict],
     project_dir: Path,
-    tmp_path: Path,
+    cache_dir: Path,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[tuple[str, Path]], list[str]]:
     """Render scene stills to MP4 with parallel ffmpeg (bounded by EXPORT_FFMPEG_WORKERS)."""
     workers = max(1, int(config.EXPORT_FFMPEG_WORKERS))
 
     def _one(scene: dict) -> tuple[str, Path, str]:
+        arcname, mp4_path = _cached_scene_mp4(scene, project_dir, cache_dir)
         slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
-        if scene.get("image_status") != "done":
-            raise RuntimeError(
-                f"Scene slot {slot} has no completed image; finish or remove failed rows first."
-            )
-        rel = str(scene.get("image_path", "")).replace("\\", "/")
-        ip = project_dir / rel
-        if not ip.exists():
-            raise RuntimeError(f"Missing image for slot {slot:03d}: {ip.name}")
-
+        mp4_name = Path(arcname).name
         dur = float(scene.get("duration") or 0.0)
         if dur <= 0:
             dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
-
-        mp4_name = f"scene_{slot:03d}.mp4"
-        mp4_path = tmp_path / mp4_name
-        _image_to_mp4(ip, mp4_path, dur)
         line = (
-            f"{mp4_name}\tslot={slot:03d}\tstart={float(scene.get('start_time', 0)):.3f}\t"
+            f"{arcname}\tslot={slot:03d}\tstart={float(scene.get('start_time', 0)):.3f}\t"
             f"end={float(scene.get('end_time', 0)):.3f}\tduration={dur:.3f}"
         )
-        return mp4_name, mp4_path, line
+        return arcname, mp4_path, line
 
     mp4_jobs: list[tuple[str, Path]] = []
     manifest_lines: list[str] = []
@@ -771,21 +959,41 @@ def _run_export_job(project_id: str, job_id: str) -> None:
 
         project_dir = config.PROJECTS_DIR / project_id
         timing = _load_timing(project_id)
+        cache_dir = _export_cache_dir(project_dir)
+        export_fp = _export_fingerprint(project_dir, ordered, meta)
+        cached_zip = cache_dir / f"export_{export_fp}.zip"
 
         raw_name = meta.get("name") or "project"
         slug = "".join(c if c.isalnum() or c in "._-" else "_" for c in raw_name)[:80] or "project"
         zip_filename = f"{slug}_tatterveil_export.zip"
         zip_path = _export_tmpdir / f"{job_id}.zip"
 
-        # One combined voice-over for the whole video (if present).
-        voiceover = meta.get("voiceover") or {}
-        vo_rel = str(voiceover.get("path") or "").replace("\\", "/")
-        vo_src = project_dir / vo_rel if vo_rel else None
-        has_audio = bool(
-            voiceover.get("status") == "done" and vo_src is not None and vo_src.exists()
-        )
-        vo_arcname = f"voiceovers/{voiceover.get('filename') or 'full_voiceover.wav'}" if has_audio else ""
+        vo_src, vo_arcname = _voiceover_export_paths(project_dir, meta)
+        has_audio = vo_src is not None
 
+        if cached_zip.exists() and cached_zip.stat().st_size > 0:
+            shutil.copy2(cached_zip, zip_path)
+            size = zip_path.stat().st_size
+            with _export_jobs_lock:
+                j = _export_jobs.get(job_id)
+                if j is not None:
+                    j.update(
+                        {
+                            "status": "done",
+                            "stage": "ready",
+                            "percent": 100,
+                            "current": 1,
+                            "total": 1,
+                            "message": "Archive ready (cached).",
+                            "file_path": str(zip_path),
+                            "file_name": zip_filename,
+                            "size_bytes": size,
+                            "updated_at": time.time(),
+                        }
+                    )
+            return
+
+        # One combined voice-over for the whole video (if present).
         total_steps = len(ordered) + 1  # MP4 renders + final ZIP packaging step
         _update_export_job(
             job_id,
@@ -802,17 +1010,14 @@ def _run_export_job(project_id: str, job_id: str) -> None:
             "# Each MP4 is one still image held for the scene duration on the script timeline.",
         ]
         if has_audio:
+            voiceover = meta.get("voiceover") or {}
             manifest_lines.append(
                 f"# Combined narration for the whole video: {vo_arcname} "
                 f"({float(voiceover.get('duration_seconds', 0)):.1f}s)."
             )
+        manifest_lines.append("# Also included: project_meta.txt, voiceovers/full_voiceover.wav")
 
-        raw_export = {
-            "project_meta": meta,
-            "timing": timing,
-            "scenes": ordered,
-            "exported_at": time.time(),
-        }
+        exported_at = time.time()
 
         with tempfile.TemporaryDirectory(prefix=f"tatterveil_export_{job_id}_") as tmp:
             tmp_path = Path(tmp)
@@ -829,7 +1034,7 @@ def _run_export_job(project_id: str, job_id: str) -> None:
 
             try:
                 mp4_jobs, mp4_manifest_lines = _parallel_render_export_mp4s(
-                    ordered, project_dir, tmp_path, on_progress=on_mp4_progress
+                    ordered, project_dir, cache_dir, on_progress=on_mp4_progress
                 )
             except RuntimeError as exc:
                 _update_export_job(
@@ -841,9 +1046,10 @@ def _run_export_job(project_id: str, job_id: str) -> None:
 
             manifest = tmp_path / "scene_timestamps.txt"
             manifest.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
-            raw_json = tmp_path / "project_export_metadata.json"
-            raw_json.write_text(
-                json.dumps(raw_export, indent=2, ensure_ascii=False), encoding="utf-8"
+            meta_txt = tmp_path / "project_meta.txt"
+            meta_txt.write_text(
+                _build_export_meta_text(meta, timing, ordered, exported_at),
+                encoding="utf-8",
             )
 
             _update_export_job(
@@ -854,13 +1060,18 @@ def _run_export_job(project_id: str, job_id: str) -> None:
                 message="Packing ZIP archive…",
             )
 
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(manifest, arcname="scene_timestamps.txt")
-                zf.write(raw_json, arcname="project_export_metadata.json")
-                for name, pth in sorted(mp4_jobs, key=lambda x: x[0]):
-                    zf.write(pth, arcname=name, compress_type=zipfile.ZIP_STORED)
-                if has_audio:
-                    zf.write(vo_src, arcname=vo_arcname, compress_type=zipfile.ZIP_STORED)
+            _write_export_zip(
+                zip_path,
+                manifest_path=manifest,
+                meta_txt_path=meta_txt,
+                mp4_jobs=mp4_jobs,
+                vo_src=vo_src,
+                vo_arcname=vo_arcname,
+            )
+            try:
+                shutil.copy2(zip_path, cached_zip)
+            except OSError:
+                logger.warning("Could not cache export zip for project %s", project_id)
 
         size = zip_path.stat().st_size if zip_path.exists() else 0
         with _export_jobs_lock:
@@ -897,57 +1108,53 @@ def _build_export_zip(project_id: str) -> tuple[bytes, str]:
     ordered = sort_scenes_for_display(scenes)
     project_dir = config.PROJECTS_DIR / project_id
     timing = _load_timing(project_id)
+    cache_dir = _export_cache_dir(project_dir)
 
     raw_name = meta.get("name") or "project"
     slug = "".join(c if c.isalnum() or c in "._-" else "_" for c in raw_name)[:80] or "project"
 
-    voiceover = meta.get("voiceover") or {}
-    vo_rel = str(voiceover.get("path") or "").replace("\\", "/")
-    vo_src = project_dir / vo_rel if vo_rel else None
-    has_audio = bool(
-        voiceover.get("status") == "done" and vo_src is not None and vo_src.exists()
-    )
-    vo_arcname = f"voiceovers/{voiceover.get('filename') or 'full_voiceover.wav'}" if has_audio else ""
+    vo_src, vo_arcname = _voiceover_export_paths(project_dir, meta)
+    has_audio = vo_src is not None
 
-    buf = io.BytesIO()
     lines = [
         "# filename | slot | start_sec | end_sec | duration_sec",
         "# Each MP4 is one still image held for the scene duration on the script timeline.",
     ]
     if has_audio:
+        voiceover = meta.get("voiceover") or {}
         lines.append(
             f"# Combined narration for the whole video: {vo_arcname} "
             f"({float(voiceover.get('duration_seconds', 0)):.1f}s)."
         )
+    lines.append("# Also included: project_meta.txt, voiceovers/full_voiceover.wav")
 
-    raw_export = {
-        "project_meta": meta,
-        "timing": timing,
-        "scenes": ordered,
-        "exported_at": time.time(),
-    }
+    exported_at = time.time()
 
     with tempfile.TemporaryDirectory(prefix="tatterveil_export_") as tmp:
         tmp_path = Path(tmp)
         mp4_jobs, mp4_manifest_lines = _parallel_render_export_mp4s(
-            ordered, project_dir, tmp_path
+            ordered, project_dir, cache_dir
         )
         lines.extend(mp4_manifest_lines)
 
         manifest = tmp_path / "scene_timestamps.txt"
         manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        raw_json = tmp_path / "project_export_metadata.json"
-        raw_json.write_text(json.dumps(raw_export, indent=2, ensure_ascii=False), encoding="utf-8")
+        meta_txt = tmp_path / "project_meta.txt"
+        meta_txt.write_text(
+            _build_export_meta_text(meta, timing, ordered, exported_at),
+            encoding="utf-8",
+        )
 
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(manifest, arcname="scene_timestamps.txt")
-            zf.write(raw_json, arcname="project_export_metadata.json")
-            for name, pth in sorted(mp4_jobs, key=lambda x: x[0]):
-                zf.write(pth, arcname=name, compress_type=zipfile.ZIP_STORED)
-            if has_audio:
-                zf.write(vo_src, arcname=vo_arcname, compress_type=zipfile.ZIP_STORED)
-
-    return buf.getvalue(), f"{slug}_tatterveil_export.zip"
+        zip_tmp = tmp_path / "export.zip"
+        _write_export_zip(
+            zip_tmp,
+            manifest_path=manifest,
+            meta_txt_path=meta_txt,
+            mp4_jobs=mp4_jobs,
+            vo_src=vo_src,
+            vo_arcname=vo_arcname,
+        )
+        return zip_tmp.read_bytes(), f"{slug}_tatterveil_export.zip"
 
 
 # ─── Regeneration queue (up to REGEN_PARALLELISM concurrent image renders) ──
@@ -1227,6 +1434,8 @@ def api_generate():
     rest_rate = int(data.get("rest_rate", 2))
     voice_speed = _parse_voice_speed(data.get("voice_speed", config.DEFAULT_VOICE_SPEED))
 
+    if not config.ELEVEN_API_KEY:
+        return jsonify({"error": "ELEVEN_API_KEY is required for voice-over and timestamps."}), 400
     if not script:
         return jsonify({"error": "Script is required."}), 400
     if len(script.split()) < 10:
@@ -1313,7 +1522,6 @@ def api_status(project_id: str):
                 "scene_type": s.get("scene_type"),
                 "scene_type_name": s.get("scene_type_name"),
                 "time_period": s.get("time_period"),
-                "abstraction_mode": s.get("abstraction_mode"),
                 "script_segment": s.get("script_segment", ""),
                 "prompt": s.get("prompt", ""),
                 "negative_prompt": s.get("negative_prompt"),
@@ -1366,6 +1574,10 @@ def project_view(project_id: str):
     scenes_all = _scenes_live(project_id)
     scenes = sort_scenes_for_display(scenes_all)
     duplicate_slots = duplicate_slot_numbers(scenes_all)
+    slot_variant_counts: dict[int, int] = {}
+    for s in scenes_all:
+        slot = int(s.get("slot_number") or s.get("scene_number") or 0)
+        slot_variant_counts[slot] = slot_variant_counts.get(slot, 0) + 1
     timing = _load_timing(project_id)
     has_done_image = any(s.get("image_status") == "done" for s in scenes_all)
     step = state.get("step", "queued")
@@ -1388,6 +1600,7 @@ def project_view(project_id: str):
         cost_actual=meta.get("cost_actual"),
         voiceover=_voiceover_public(meta.get("voiceover")),
         regen_parallelism=int(config.REGEN_PARALLELISM),
+        slot_variant_counts=slot_variant_counts,
         scene_type_names=SCENE_TYPE_NAMES,
         scene_type_colors=SCENE_TYPE_COLORS,
         period_labels=PERIOD_LABELS,
@@ -1589,23 +1802,33 @@ def api_delete_scene_row(project_id: str, entry_id: str):
     if _load_meta(project_id) is None:
         abort(404)
     scenes = _scenes_live(project_id)
-    removed: dict | None = None
-    kept: list[dict] = []
-    for s in scenes:
-        if s.get("entry_id") == entry_id:
-            removed = s
-        else:
-            kept.append(s)
-    if removed is None:
+    hit = find_entry(scenes, entry_id)
+    if hit is None:
         abort(404)
+    _, removed = hit
+    slot = int(removed.get("slot_number") or removed.get("scene_number") or 0)
+    if count_variants_for_slot(scenes, slot) <= 1:
+        return jsonify({
+            "error": "Cannot delete the only image for this scene slot. "
+                     "At least one image is required for export.",
+        }), 409
+
+    project_dir = config.PROJECTS_DIR / project_id
     rel = removed.get("image_path")
     if rel:
-        ip = config.PROJECTS_DIR / project_id / str(rel).replace("\\", "/")
+        ip = project_dir / str(rel).replace("\\", "/")
         if ip.exists():
             try:
                 ip.unlink()
             except OSError:
                 pass
+
+    kept = [s for s in scenes if s.get("entry_id") != entry_id]
+    if int(removed.get("variant_index", 0)) == 0:
+        kept = promote_variants_after_delete(kept, slot, project_dir)
+    else:
+        kept = ensure_scene_entries(kept)
+
     _save_scenes(project_id, kept)
     return jsonify({"ok": True})
 

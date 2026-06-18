@@ -568,14 +568,16 @@ function onSceneGridClick(e) {
   const del = e.target.closest(".btn-delete-variant");
   if (del) {
     const id = del.getAttribute("data-entry-id");
-    if (!id || !confirm("Delete this image variant? This cannot be undone.")) return;
+    if (del.disabled || !id) return;
+    if (!confirm("Delete this image variant? This cannot be undone.")) return;
     fetch(`/api/projects/${window.PROJECT_ID}/scenes/${id}`, { method: "DELETE" })
-      .then((r) => {
-        if (!r.ok) throw new Error("Delete failed");
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || "Delete failed");
         showToast("Variant removed.", "ok");
         pollStatus();
       })
-      .catch(() => showToast("Delete failed.", "error"));
+      .catch((err) => showToast(err.message || "Delete failed.", "error"));
     return;
   }
 
@@ -665,11 +667,32 @@ function applyStatus(data) {
 
   if (step === "done" && !window._doneToastShown) {
     window._doneToastShown = true;
-    showToast("All scenes generated successfully!", "ok", 5000);
+    const failed = (data.scenes || []).filter((s) => s.image_status === "error").length;
+    if (failed > 0) {
+      showToast(
+        `Generation finished with ${failed} scene image(s) failed. Review errors below.`,
+        "error",
+        8000
+      );
+    } else {
+      showToast("All scenes generated successfully!", "ok", 5000);
+    }
   }
 
   if (step === "error") {
-    showToast(`Error: ${message}`, "error", 8000);
+    const code = data.error_code || "generation_failed";
+    if (window._lastErrorCode !== code || window._lastErrorMessage !== message) {
+      window._lastErrorCode = code;
+      window._lastErrorMessage = message;
+      let msg = message;
+      if (code === "content_policy_script") {
+        msg =
+          "Script rejected by content safety filters. Start a new project with a revised script.";
+      } else if (code === "voice_failed") {
+        msg = message || "Voice-over generation failed. Check your ElevenLabs API key and try again.";
+      }
+      showToast(msg, "error", 10000);
+    }
     clearTimeout(_pollTimer);
   }
 
@@ -728,12 +751,22 @@ function sortScenesClient(scenes) {
   });
 }
 
+function variantCountBySlot(scenes) {
+  const counts = {};
+  for (const s of scenes || []) {
+    const slot = s.slot_number || s.scene_number || 0;
+    counts[slot] = (counts[slot] || 0) + 1;
+  }
+  return counts;
+}
+
 function syncSceneGrid(scenes) {
   const grid = document.getElementById("scene-grid");
   if (!grid) return;
   if (!scenes.length) return;
 
   const sorted = sortScenesClient(scenes);
+  const slotCounts = variantCountBySlot(scenes);
   const wanted = new Set(sorted.map((s) => s.entry_id).filter(Boolean));
 
   grid.querySelectorAll(".scene-card").forEach((node) => {
@@ -744,13 +777,15 @@ function syncSceneGrid(scenes) {
   sorted.forEach((scene, idx) => {
     if (!scene.entry_id) return;
     const id = scene.entry_id;
+    const slot = scene.slot_number || scene.scene_number || 0;
+    const variantCount = slotCounts[slot] || 1;
     let card = document.getElementById(`scene-entry-${id}`);
     if (!card) {
-      card = buildSceneCard(scene, idx);
+      card = buildSceneCard(scene, idx, variantCount);
       grid.appendChild(card);
       requestAnimationFrame(() => card.classList.add("animate-fade-up"));
     } else {
-      updateSceneCardMedia(card, scene);
+      updateSceneCardMedia(card, scene, variantCount);
     }
   });
 }
@@ -793,7 +828,7 @@ function sceneFullImageUrl(filename) {
   return `/projects/${window.PROJECT_ID}/images/${filename}`;
 }
 
-function updateSceneCardMedia(card, scene) {
+function updateSceneCardMedia(card, scene, variantCount = 1) {
   const hasImage = scene.image_path && scene.image_status === "done";
   const wrap = card.querySelector(".scene-img-wrap");
   if (!wrap) return;
@@ -846,6 +881,15 @@ function updateSceneCardMedia(card, scene) {
   const regBtn = card.querySelector(".btn-regenerate-variant");
   if (regBtn) regBtn.disabled = scene.image_status !== "done";
 
+  const delBtn = card.querySelector(".btn-delete-variant");
+  if (delBtn) {
+    const canDelete = (variantCount || 1) > 1;
+    delBtn.disabled = !canDelete;
+    delBtn.title = canDelete
+      ? "Remove this variant"
+      : "Cannot delete the only image for this scene slot";
+  }
+
   let dupBar = card.querySelector(".scene-dup-banner");
   if (scene.slot_has_duplicates) {
     if (!dupBar) {
@@ -860,7 +904,7 @@ function updateSceneCardMedia(card, scene) {
   }
 }
 
-function buildSceneCard(scene, idx) {
+function buildSceneCard(scene, idx, variantCount) {
   const slot = scene.slot_number || scene.scene_number;
   const num = slot;
   const startMM = fmtTime(scene.start_time || 0);
@@ -903,9 +947,11 @@ function buildSceneCard(scene, idx) {
     ? ' class="scene-img-wrap scene-img-wrap--clickable" role="button" tabindex="0" data-action="open-lightbox"'
     : ' class="scene-img-wrap"';
 
-  const abstractTag = scene.abstraction_mode
-    ? `<span class="scene-abstract-tag">Abstract Mode</span>`
-    : "";
+  const canDelete = (variantCount || 1) > 1;
+  const deleteDisabled = canDelete ? "" : "disabled";
+  const deleteTitle = canDelete
+    ? "Remove this variant"
+    : "Cannot delete the only image for this scene slot";
 
   const reasoningHtml =
     scene.time_period_reasoning || scene.scene_type_reasoning
@@ -951,7 +997,6 @@ function buildSceneCard(scene, idx) {
       <div class="scene-card-tags">
         <span class="scene-type-tag" style="--tag-color:${typeColor}">${escapeHTML(typeName)}</span>
         <span class="scene-period-tag">${escapeHTML(periodLabel)}</span>
-        ${abstractTag}
       </div>
       ${reasoningHtml}
       <div class="scene-section">
@@ -966,7 +1011,7 @@ function buildSceneCard(scene, idx) {
       </div>
       <div class="scene-card-actions">
         <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}" ${scene.image_status === "done" ? "" : "disabled"}>Regenerate</button>
-        <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}">Delete variant</button>
+        <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}" ${deleteDisabled} title="${escapeAttr(deleteTitle)}">Delete variant</button>
       </div>
       <details class="scene-prompt-details">
         <summary class="scene-prompt-toggle">
@@ -1028,7 +1073,7 @@ function updateExportAvailability(data) {
       ? "Export disabled: resolve duplicate timestamps first."
       : step !== "done" && step !== "error"
         ? "Export is available when generation finishes."
-        : "Download MP4 chunks + metadata as a ZIP.";
+        : "ZIP: WAV, scene MP4s, project_meta.txt, scene_timestamps.txt.";
   }
 }
 
@@ -1144,7 +1189,7 @@ async function pollExportStatus() {
       if (btn) btn.disabled = false;
       return;
     }
-    _exportPollTimer = setTimeout(pollExportStatus, 700);
+    _exportPollTimer = setTimeout(pollExportStatus, job.stage === "rendering_mp4s" ? 1200 : 700);
   } catch (e) {
     _exportPollTimer = setTimeout(pollExportStatus, 1500);
   }

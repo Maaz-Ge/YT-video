@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -17,11 +18,7 @@ def image_filename_for_scene(scene: dict[str, Any]) -> str:
 
 
 def ensure_scene_entries(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ensure every scene row has entry_id, slot_number, variant_index, image_filename.
-
-    Voice-over is a single project-level combined file (see meta['voiceover']),
-    not a per-scene asset, so no voice fields are added here.
-    """
+    """Ensure every scene row has entry_id, slot_number, variant_index, image_filename."""
     out: list[dict[str, Any]] = []
     for i, raw in enumerate(scenes):
         s = dict(raw)
@@ -51,6 +48,14 @@ def next_variant_index(scenes: list[dict[str, Any]], slot_number: int) -> int:
     return mx + 1
 
 
+def count_variants_for_slot(scenes: list[dict[str, Any]], slot_number: int) -> int:
+    return sum(
+        1
+        for s in scenes
+        if int(s.get("slot_number") or s.get("scene_number") or -1) == slot_number
+    )
+
+
 def duplicate_slot_numbers(scenes: list[dict[str, Any]]) -> list[int]:
     slots = [int(s.get("slot_number") or s.get("scene_number") or 0) for s in scenes]
     counts = Counter(slots)
@@ -72,3 +77,46 @@ def find_entry(scenes: list[dict[str, Any]], entry_id: str) -> tuple[int, dict[s
         if s.get("entry_id") == entry_id:
             return i, s
     return None
+
+
+def promote_variants_after_delete(
+    scenes: list[dict[str, Any]],
+    slot_number: int,
+    project_dir: Path,
+) -> list[dict[str, Any]]:
+    """After deleting variant_index=0, reindex remaining variants and rename PNGs."""
+    images_dir = project_dir / "images"
+    slot_rows = [
+        dict(s)
+        for s in scenes
+        if int(s.get("slot_number") or s.get("scene_number") or -1) == slot_number
+    ]
+    other = [
+        s for s in scenes
+        if int(s.get("slot_number") or s.get("scene_number") or -1) != slot_number
+    ]
+    if not slot_rows:
+        return ensure_scene_entries(scenes)
+
+    slot_rows.sort(key=lambda s: int(s.get("variant_index", 0)))
+    reindexed: list[dict[str, Any]] = []
+    for new_v, row in enumerate(slot_rows):
+        row = dict(row)
+        old_path = images_dir / str(row.get("image_filename") or "")
+        row["variant_index"] = new_v
+        row["image_filename"] = image_filename_for_scene(row)
+        row["image_path"] = f"images/{row['image_filename']}"
+        new_path = images_dir / row["image_filename"]
+        if old_path.exists() and old_path != new_path:
+            if new_path.exists():
+                try:
+                    new_path.unlink()
+                except OSError:
+                    pass
+            try:
+                shutil.move(str(old_path), str(new_path))
+            except OSError:
+                pass
+        reindexed.append(row)
+
+    return ensure_scene_entries(other + reindexed)
