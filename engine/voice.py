@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
+# Silence inserted between consecutive ElevenLabs chunks so the join sounds
+# like a natural inter-sentence pause rather than clipped words.
+CHUNK_GAP_MS: int = 200
+
 
 def _require_eleven_key() -> None:
     if not config.ELEVEN_API_KEY:
@@ -115,16 +119,59 @@ def _media_duration_seconds(path: Path) -> float:
     return int(h) * 3600 + int(mn) * 60 + float(sec)
 
 
-def _ffmpeg_concat_mp3(mp3_paths: list[Path], out_mp3: Path) -> None:
+def _generate_silence_mp3(out_path: Path, duration_ms: int) -> None:
+    """Write a short silent MP3 using ffmpeg anullsrc (44100 Hz stereo)."""
+    ff = _which_ffmpeg()
+    if not ff:
+        raise RuntimeError("ffmpeg required to generate silence gap.")
+    dur_sec = max(0.01, duration_ms / 1000.0)
+    proc = subprocess.run(
+        [
+            ff, "-y",
+            "-f", "lavfi",
+            "-t", str(dur_sec),
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-c:a", "libmp3lame",
+            "-q:a", "4",
+            str(out_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip() or "ffmpeg silence gen failed"
+        raise RuntimeError(msg)
+
+
+def _ffmpeg_concat_mp3(
+    mp3_paths: list[Path],
+    out_mp3: Path,
+    gap_ms: int = 0,
+) -> None:
+    """Concatenate MP3 files, optionally inserting a silent gap between each pair."""
     ff = _which_ffmpeg()
     if not ff:
         raise RuntimeError(
             "ffmpeg is not installed or not on PATH — required to merge voice-over chunks."
         )
+
+    # Build interleaved list: chunk0, silence, chunk1, silence, chunk2, …
+    concat_files: list[Path] = []
+    silence_path: Path | None = None
+    if gap_ms > 0 and len(mp3_paths) > 1:
+        silence_path = out_mp3.parent / "_gap_silence.mp3"
+        _generate_silence_mp3(silence_path, gap_ms)
+        for i, p in enumerate(mp3_paths):
+            concat_files.append(p)
+            if i < len(mp3_paths) - 1:
+                concat_files.append(silence_path)
+    else:
+        concat_files = list(mp3_paths)
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     ) as lst:
-        for p in mp3_paths:
+        for p in concat_files:
             safe = str(p.resolve()).replace("'", "'\\''")
             lst.write(f"file '{safe}'\n")
         list_path = lst.name
@@ -444,6 +491,7 @@ def generate_voice_with_timestamps(
 
     all_timeline: list[dict] = []
     global_index = 0
+    gap_sec = CHUNK_GAP_MS / 1000.0
 
     with tempfile.TemporaryDirectory(prefix="tatterveil_vo_") as tmp:
         tmp_path = Path(tmp)
@@ -452,6 +500,7 @@ def generate_voice_with_timestamps(
 
         for i, chunk_sentences in enumerate(chunk_groups):
             chunk_start = time_offset
+            is_last_chunk = i == total_chunks - 1
             chunk_text = " ".join(chunk_sentences)
             audio_bytes, alignment = _call_with_timestamps(chunk_text, voice_settings)
 
@@ -477,14 +526,11 @@ def generate_voice_with_timestamps(
                 row["sentence_index"] = global_index
                 all_timeline.append(row)
 
-            if mp3_dur > 0:
-                time_offset = chunk_start + mp3_dur
-            elif chunk_times:
-                time_offset = float(chunk_times[-1]["end_time"])
-            elif alignment.get("character_end_times_seconds"):
-                time_offset = (
-                    float(alignment["character_end_times_seconds"][-1]) + chunk_start
-                )
+            # Advance time_offset: chunk audio duration + gap (except after last chunk)
+            chunk_audio = mp3_dur if mp3_dur > 0 else (
+                float(chunk_times[-1]["end_time"]) - chunk_start if chunk_times else 0.0
+            )
+            time_offset = chunk_start + chunk_audio + (0.0 if is_last_chunk else gap_sec)
 
             partial = {
                 "source": "elevenlabs_timestamps",
@@ -503,7 +549,7 @@ def generate_voice_with_timestamps(
 
         combined_mp3 = tmp_path / "combined.mp3"
         combined_wav = tmp_path / "combined.wav"
-        _ffmpeg_concat_mp3(mp3_paths, combined_mp3)
+        _ffmpeg_concat_mp3(mp3_paths, combined_mp3, gap_ms=CHUNK_GAP_MS)
         _ffmpeg_mp3_to_wav(combined_mp3, combined_wav)
         out_path.write_bytes(combined_wav.read_bytes())
 

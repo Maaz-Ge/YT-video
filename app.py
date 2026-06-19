@@ -2,11 +2,13 @@
 Tatterveil Scene Studio — Flask application.
 """
 
+import contextlib
 import hashlib
 import io
 import json
 import logging
 import shutil
+import wave
 import subprocess
 import tempfile
 import threading
@@ -551,6 +553,17 @@ def _which_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def _wav_duration_seconds(path: Path) -> float:
+    """Read duration from a WAV file without ffmpeg."""
+    try:
+        with contextlib.closing(wave.open(str(path), "rb")) as w:
+            frames = w.getnframes()
+            rate = w.getframerate()
+            return (frames / float(rate)) if rate else 0.0
+    except Exception:
+        return 0.0
+
+
 def _export_cache_dir(project_dir: Path) -> Path:
     cache = project_dir / "export_cache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -611,8 +624,13 @@ def _cached_scene_mp4(
     scene: dict,
     project_dir: Path,
     cache_dir: Path,
+    dur_override: float | None = None,
 ) -> tuple[str, Path]:
-    """Return (zip arcname, mp4 path), reusing export_cache when the scene is unchanged."""
+    """Return (zip arcname, mp4 path), reusing export_cache when the scene is unchanged.
+
+    dur_override, when given, replaces the scene's stored duration for rendering.
+    The cache key includes the override so a changed duration triggers a re-render.
+    """
     slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
     if scene.get("image_status") != "done":
         raise RuntimeError(
@@ -623,15 +641,21 @@ def _cached_scene_mp4(
     if not image_path.exists():
         raise RuntimeError(f"Missing image for slot {slot:03d}: {image_path.name}")
 
-    dur = float(scene.get("duration") or 0.0)
-    if dur <= 0:
-        dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+    if dur_override is not None and dur_override > 0:
+        dur = float(dur_override)
+    else:
+        dur = float(scene.get("duration") or 0.0)
+        if dur <= 0:
+            dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
 
     mp4_name = f"scene_{slot:03d}.mp4"
     arcname = f"scenes/{mp4_name}"
     cache_mp4 = cache_dir / mp4_name
     cache_key_path = cache_dir / f"{mp4_name}.key"
-    cache_key = _scene_mp4_cache_key(scene, image_path)
+
+    # Include override duration in cache key so changes invalidate the cached file
+    base_key = _scene_mp4_cache_key(scene, image_path)
+    cache_key = f"{base_key}|override={round(dur, 4):.4f}"
 
     if (
         cache_mp4.exists()
@@ -802,16 +826,36 @@ def _parallel_render_export_mp4s(
     cache_dir: Path,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[tuple[str, Path]], list[str]]:
-    """Render scene stills to MP4 with parallel ffmpeg (bounded by EXPORT_FFMPEG_WORKERS)."""
+    """Render scene stills to MP4 with parallel ffmpeg (bounded by EXPORT_FFMPEG_WORKERS).
+
+    The last scene's MP4 is extended to cover any rounding shortfall so that
+    sum(MP4 durations) == WAV duration exactly.
+    """
     workers = max(1, int(config.EXPORT_FFMPEG_WORKERS))
 
+    # Compute per-scene duration overrides anchored to real WAV length.
+    dur_overrides: dict[int, float] = {}
+    vo_path = project_dir / "voiceovers" / "full_voiceover.wav"
+    wav_dur = _wav_duration_seconds(vo_path) if vo_path.exists() else 0.0
+    if wav_dur > 0 and ordered:
+        accumulated = 0.0
+        for scene in ordered[:-1]:
+            d = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+            d = max(0.05, d)
+            dur_overrides[id(scene)] = d
+            accumulated += d
+        # Last scene absorbs any rounding remainder so total == wav_dur exactly
+        last_dur = max(0.05, wav_dur - accumulated)
+        dur_overrides[id(ordered[-1])] = last_dur
+
     def _one(scene: dict) -> tuple[str, Path, str]:
-        arcname, mp4_path = _cached_scene_mp4(scene, project_dir, cache_dir)
+        override = dur_overrides.get(id(scene))
+        arcname, mp4_path = _cached_scene_mp4(scene, project_dir, cache_dir, dur_override=override)
         slot = int(scene.get("slot_number") or scene.get("scene_number") or 0)
-        mp4_name = Path(arcname).name
-        dur = float(scene.get("duration") or 0.0)
-        if dur <= 0:
-            dur = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+        dur = override if override is not None else (
+            float(scene.get("duration") or 0.0)
+            or float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+        )
         line = (
             f"{arcname}\tslot={slot:03d}\tstart={float(scene.get('start_time', 0)):.3f}\t"
             f"end={float(scene.get('end_time', 0)):.3f}\tduration={dur:.3f}"
