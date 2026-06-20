@@ -167,13 +167,33 @@ Never stage posed portraits or hero close-ups of faces.
 
 Build negative_prompt from universal + type-specific negatives.
 
-CONTENT SAFETY — avoid wording that triggers image moderation:
-• No graphic violence, gore, nudity, sexual content, minors, hate symbols
+CONTENT SAFETY — CRITICAL: the prompt you write goes directly to OpenAI's image \
+generation API which has a strict safety filter. Even if the script describes \
+historical violence, suffering, or sensitive topics, YOUR PROMPT MUST NEVER contain \
+words or phrases that could trigger moderation. Violations cause the whole generation \
+to fail and show an error block instead of an image.
+
+Hard-banned words / phrases in prompts (NEVER use these, even in historical context):
+  blood, bloody, gore, gory, corpse, cadaver, dead body, decapitated, dismembered,
+  severed, mutilated, torture, torturing, massacre, slaughter, atrocity, genocide,
+  naked, nudity, nude, bare skin, exposed, explicit, sexual, erotic,
+  child, children, minor, infant, baby (as subject of distress),
+  hate symbol, swastika, execut*, hanging body, lynching,
+  weapon aimed at person, bullet wound, stabbed, impaled
+
+Safe documentary replacements (use these instead):
+• Battle / warfare  → "aftermath of conflict at distance", "ancient battlefield at dawn",
+                       "military formation silhouetted against smoke-filled sky"
+• Death / burial    → "ancient burial site", "weathered stone tomb", "ceremonial grave goods"
+• Violence / pain   → "ruins of a settlement", "scorched earth landscape", "distant figures fleeing"
+• Suffering         → "people gathered in shadow", "silhouettes of survivors at horizon"
+• Weapons           → "discarded ancient weapons on stone floor", "archaeological weapon display"
+
+Additional rules:
 • No identifiable portraits of real living persons
-• Avoid literal trigger words: blood-soaked, corpse, torture, naked, child
-• Use documentary-safe phrasing: weathered stone, archaeological remains at distance, \
-  shadowed figures with faces obscured, distant silhouettes
-• Prefer environment/artifact focus over human suffering depictions
+• Always redirect human-suffering scenes to environment, artifact, or silhouette focus
+• When the script contains banned words, paraphrase the visual concept entirely
+• Prefer atmosphere, light, texture, and landscape over literal depictions of harm
 
 SCENE-TYPE NEGATIVE ADDITIONS:
 • Type 1: + floating objects, impossible physics, jewelry catalog style

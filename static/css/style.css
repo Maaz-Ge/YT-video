@@ -2324,6 +2324,30 @@ details > summary::-webkit-details-marker { display: none; }
   margin-bottom: var(--sp-sm);
 }
 
+/* Hint line shown for blocked / normal regen. */
+.regen-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0 0 var(--sp-sm) 0;
+  line-height: 1.5;
+}
+.regen-hint--blocked {
+  color: #d4884a;
+  background: rgba(212, 136, 74, 0.08);
+  border: 1px solid rgba(212, 136, 74, 0.3);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+/* Label above the textarea */
+.regen-instructions-label {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
 /* ── Export progress modal ───────────────────────────────────────────────── */
 .export-progress-track {
   height: 8px;

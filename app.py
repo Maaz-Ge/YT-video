@@ -1276,7 +1276,7 @@ def _regen_busy_count(project_id: str) -> int:
         )
 
 
-def _enqueue_regen_job(project_id: str, parent_entry_id: str, instructions: str) -> dict:
+def _enqueue_regen_job(project_id: str, parent_entry_id: str, instructions: str, is_blocked_recovery: bool = False) -> dict:
     """Create + submit a regeneration job. Returns the public job view."""
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -1288,6 +1288,7 @@ def _enqueue_regen_job(project_id: str, parent_entry_id: str, instructions: str)
         "slot_number": None,
         "variant_index": None,
         "instructions": instructions,
+        "is_blocked_recovery": is_blocked_recovery,
         "status": "queued",
         "state": "queued",
         "stage_message": "Waiting for a worker…",
@@ -1302,7 +1303,12 @@ def _enqueue_regen_job(project_id: str, parent_entry_id: str, instructions: str)
 
 
 def _run_regen_job(job_id: str) -> None:
-    """Worker: refine prompt → append new variant row → generate image."""
+    """Worker: refine prompt → append new variant row → generate image.
+
+    For blocked-recovery jobs (is_blocked_recovery=True) the user's instructions
+    become the prompt directly without calling the LLM, so there is no risk of
+    the refinement model accidentally reproducing a flagged phrase.
+    """
     with _regen_jobs_lock:
         j = _regen_jobs.get(job_id)
         if not j:
@@ -1310,6 +1316,7 @@ def _run_regen_job(job_id: str) -> None:
         project_id = j["project_id"]
         parent_entry_id = j["parent_entry_id"]
         instructions = j["instructions"]
+        is_blocked_recovery = j.get("is_blocked_recovery", False)
 
     try:
         meta = _load_meta(project_id)
@@ -1330,22 +1337,38 @@ def _run_regen_job(job_id: str) -> None:
             _, base = hit
             slot = int(base.get("slot_number") or base.get("scene_number") or 0)
 
-        _update_regen_job(
-            job_id,
-            status="running",
-            state="refining_prompt",
-            slot_number=slot,
-            stage_message="Composing new prompt with your instructions…",
-        )
+        if is_blocked_recovery:
+            # Skip LLM refinement — user's description becomes the prompt directly.
+            # Wrap it with the mandatory style anchors to keep render quality consistent.
+            _update_regen_job(
+                job_id,
+                status="running",
+                state="refining_prompt",
+                slot_number=slot,
+                stage_message="Using your description as the new prompt…",
+            )
+            new_prompt = pipeline.build_safe_replacement_prompt(
+                user_description=instructions,
+                scene=base,
+            )
+            new_neg = base.get("negative_prompt")
+        else:
+            _update_regen_job(
+                job_id,
+                status="running",
+                state="refining_prompt",
+                slot_number=slot,
+                stage_message="Composing new prompt with your instructions…",
+            )
 
-        # LLM prompt refinement happens *outside* the scene lock so multiple
-        # workers can call the text model in parallel.
-        new_prompt, new_neg = pipeline.refine_prompt_for_regeneration(
-            previous_prompt=base.get("prompt") or "",
-            previous_negative=base.get("negative_prompt"),
-            script_segment=base.get("script_segment") or "",
-            user_instructions=instructions,
-        )
+            # LLM prompt refinement happens *outside* the scene lock so multiple
+            # workers can call the text model in parallel.
+            new_prompt, new_neg = pipeline.refine_prompt_for_regeneration(
+                previous_prompt=base.get("prompt") or "",
+                previous_negative=base.get("negative_prompt"),
+                script_segment=base.get("script_segment") or "",
+                user_instructions=instructions,
+            )
 
         # Append the new variant row under the scene lock so concurrent regens
         # don't collide on variant_index or filename.
@@ -1728,6 +1751,7 @@ def api_regenerate_scene(project_id: str, entry_id: str):
     """Queue a single regeneration job. Up to REGEN_PARALLELISM run in parallel."""
     payload = request.get_json(silent=True) or {}
     instr = (payload.get("instructions") or "").strip()
+    is_blocked = bool(payload.get("is_blocked", False))
     if not instr:
         return jsonify({"error": "Instructions are required."}), 400
     if _load_meta(project_id) is None:
@@ -1735,7 +1759,7 @@ def api_regenerate_scene(project_id: str, entry_id: str):
     scenes = _scenes_live(project_id)
     if find_entry(scenes, entry_id) is None:
         abort(404)
-    job = _enqueue_regen_job(project_id, entry_id, instr)
+    job = _enqueue_regen_job(project_id, entry_id, instr, is_blocked_recovery=is_blocked)
     return jsonify({"ok": True, "job": job})
 
 

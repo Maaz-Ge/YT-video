@@ -718,19 +718,31 @@ def split_and_prompt(
 
 # ─── 4. Image generation ──────────────────────────────────────────────────────
 
-SAFETY_REWRITE_SYSTEM = """You rewrite image-generation prompts that were blocked by a content safety filter.
+SAFETY_REWRITE_SYSTEM = """You rewrite image-generation prompts that were blocked by OpenAI's safety filter.
 
-The user gives the ORIGINAL prompt, optional negatives, the script lines for that scene, and the API error message.
+The user gives the ORIGINAL prompt, optional negatives, the script lines, and the API error message.
 
 Return JSON: { "prompt": "...", "negative_prompt": "..." or null }
 
-Rules:
-- Preserve Tatterveil documentary intent: same scene type, period, is_vista_shot, shot_scale.
+HARD RULES — the rewritten prompt must NEVER contain these words or phrases even in historical context:
+  blood, bloody, gore, gory, corpse, cadaver, dead body, decapitated, dismembered,
+  severed, mutilated, torture, torturing, massacre, slaughter, atrocity, genocide,
+  naked, nudity, nude, bare skin, exposed, explicit, sexual, erotic,
+  child, children, minor, infant, baby (as subject of distress),
+  hate symbol, swastika, execut*, hanging body, lynching,
+  weapon aimed at person, bullet wound, stabbed, impaled.
+
+Rewriting strategy:
+- Preserve documentary intent: same scene type, period, is_vista_shot, shot_scale.
 - Keep "atmospheric photorealistic", "documentary photography style", "16:9 landscape".
-- Rephrase any wording that may trigger moderation (violence, gore, nudity, minors, hate, real living persons).
-- Use documentary-safe language: distant figures, obscured faces, archaeological context, weathered materials.
-- Do NOT change the story beat — only soften phrasing so the image API accepts it.
-- Minimum ~80 words in the positive prompt.
+- Replace any banned concept with safe equivalents:
+    • battle / death → ruins, aftermath at distance, empty battlefield at dawn
+    • violence / suffering → silhouettes of figures at horizon, ancient site overgrown
+    • weapons → discarded artifacts on stone floor, archaeological display
+    • human distress → people gathered in shadow, distant figures in mist
+- Faces must always be obscured: backs turned, deep shadow, or silhouettes only.
+- Do NOT keep the story beat if doing so requires any banned phrasing — shift to environment/artifact focus.
+- Minimum 80 words in the positive prompt.
 """
 
 
@@ -1000,15 +1012,24 @@ REFINE_PROMPT_SYSTEM = """You revise image-generation prompts for a documentary-
 The user will give an EXISTING positive prompt, optional negative constraints, the script lines for that scene, and NEW instructions.
 
 Return a JSON object with keys:
-  "prompt": string — full revised positive prompt (at least ~80 words), same overall Tatterveil / atmospheric photorealistic documentary look as the original, but incorporating the user's new instructions.
+  "prompt": string — full revised positive prompt (at least ~80 words), same overall atmospheric photorealistic documentary look as the original, but incorporating the user's new instructions.
   "negative_prompt": string or null — revised negative constraints; if minor change only, reuse and lightly adjust the previous negatives; use null only if no negatives are needed.
 
-Rules:
-- Preserve period, scene type, shot_scale, and is_vista_shot intent from the original unless the user explicitly asks to change them.
-- Vista/establishing shots: high vantage, atmospheric perspective, depth layers, specific weather and time of day — never generic flat postcard wides.
-- Humans: include period-accurate figures when the script calls for people; faces never readable (backs turned, shadow, distance, silhouette only).
+CONTENT SAFETY — CRITICAL: the prompt goes directly to OpenAI's image API which enforces strict moderation.
+Your output must NEVER contain these words even in historical context:
+  blood, bloody, gore, gory, corpse, dead body, decapitated, dismembered, severed, mutilated,
+  torture, massacre, slaughter, genocide, naked, nudity, nude, explicit, sexual, erotic,
+  child/children/minor (as subject of distress), hate symbol, swastika, execut*, hanging body,
+  lynching, weapon aimed at person, bullet wound, stabbed, impaled.
+If the user's instruction asks for something that would require banned phrasing, shift to a safe
+equivalent (ruins, aftermath at distance, empty landscape, silhouettes, ancient site).
+
+Style rules:
+- Preserve period, scene type, shot_scale, and is_vista_shot intent from the original unless explicitly asked to change.
+- Vista/establishing shots: high vantage, atmospheric perspective, depth layers, specific weather and time of day.
+- Humans: include period-accurate figures when script calls for people; faces NEVER readable (backs turned, shadow, distance, silhouette only).
 - Keep 16:9 landscape, photorealistic documentary language, no watermarks, no text in image.
-- Apply the user's new instructions faithfully while staying stylistically consistent.
+- Apply the user's new instructions faithfully while staying stylistically consistent and policy-compliant.
 """
 
 
@@ -1056,3 +1077,32 @@ def refine_prompt_for_regeneration(
             if attempt < config.MAX_RETRIES - 1:
                 time.sleep(config.RETRY_DELAY * (attempt + 1))
     raise RuntimeError("LLM failed to refine prompt after retries.")
+
+
+# ─── 6. Safe replacement prompt (no-LLM path for blocked scenes) ─────────────
+
+def build_safe_replacement_prompt(user_description: str, scene: dict) -> str:
+    """
+    Build a final image prompt directly from the user's safe description,
+    bypassing any LLM refinement to avoid re-introducing blocked phrasing.
+
+    The user's description is wrapped with mandatory style anchors so the render
+    quality stays consistent with the rest of the project.
+    """
+    desc = user_description.strip().rstrip(".")
+
+    shot_scale = scene.get("shot_scale") or "medium shot"
+    period = scene.get("time_period") or ""
+    period_phrase = f", {period} era" if period else ""
+
+    style_suffix = (
+        "atmospheric photorealistic documentary photography style, "
+        "16:9 landscape format, deep cinematic shadows, "
+        "no readable faces, no modern elements, no watermarks, no text in image"
+    )
+
+    prompt = (
+        f"{desc}{period_phrase}. "
+        f"{shot_scale.capitalize()}, {style_suffix}."
+    )
+    return prompt

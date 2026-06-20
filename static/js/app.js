@@ -467,6 +467,7 @@ function initCreateForm() {
 let _pollTimer = null;
 let _lastProgress = -1;
 let _regenTargetEntryId = null;
+let _regenIsBlocked = false;
 
 const TERMINAL_STEPS = ["done", "error"];
 const STEP_ORDER = ["queued", "analysing", "voicing", "prompting", "prompting_done", "generating", "done"];
@@ -587,7 +588,9 @@ function onSceneGridClick(e) {
     if (!id) return;
     const card = reg.closest(".scene-card");
     const slot = card ? card.querySelector(".scene-badge-num") : null;
-    openRegenerateModal(id, slot ? slot.textContent.trim() : null);
+    const errEl = card ? card.querySelector(".scene-image-error") : null;
+    const isBlocked = errEl && errEl.style.display !== "none";
+    openRegenerateModal(id, slot ? slot.textContent.trim() : null, isBlocked);
     return;
   }
 
@@ -879,7 +882,13 @@ function updateSceneCardMedia(card, scene, variantCount = 1) {
     if (scene.image_status === "error") err.textContent = scene.image_error || "Image failed";
   }
   const regBtn = card.querySelector(".btn-regenerate-variant");
-  if (regBtn) regBtn.disabled = scene.image_status !== "done";
+  const canRegen = scene.image_status === "done" || scene.image_status === "error";
+  if (regBtn) {
+    regBtn.disabled = !canRegen;
+    regBtn.title = scene.image_status === "error"
+      ? "Image was blocked — regenerate with new instructions"
+      : "";
+  }
 
   const delBtn = card.querySelector(".btn-delete-variant");
   if (delBtn) {
@@ -1010,7 +1019,11 @@ function buildSceneCard(scene, idx, variantCount) {
         ${scriptSegHtml}
       </div>
       <div class="scene-card-actions">
-        <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}" ${scene.image_status === "done" ? "" : "disabled"}>Regenerate</button>
+        <button type="button" class="btn btn-ghost btn-sm btn-regenerate-variant" data-entry-id="${scene.entry_id}"
+          title="${scene.image_status === "error" ? "Image was blocked — regenerate with new instructions" : ""}"
+          ${(scene.image_status === "done" || scene.image_status === "error") ? "" : "disabled"}>
+          ${scene.image_status === "error" ? "Fix blocked image" : "Regenerate"}
+        </button>
         <button type="button" class="btn btn-ghost btn-sm btn-delete-variant" data-entry-id="${scene.entry_id}" ${deleteDisabled} title="${escapeAttr(deleteTitle)}">Delete variant</button>
       </div>
       <details class="scene-prompt-details">
@@ -1291,7 +1304,7 @@ function initRegenerateModal() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ instructions: instr }),
+          body: JSON.stringify({ instructions: instr, is_blocked: _regenIsBlocked }),
         }
       );
       const data = await res.json().catch(() => ({}));
@@ -1306,15 +1319,27 @@ function initRegenerateModal() {
   });
 }
 
-function openRegenerateModal(entryId, slotLabel) {
+function openRegenerateModal(entryId, slotLabel, isBlocked) {
   const modal = document.getElementById("regen-modal");
   const ta = document.getElementById("regen-instructions");
   const target = document.getElementById("regen-modal-target");
+  const hint = document.getElementById("regen-modal-hint");
+  const label = document.getElementById("regen-instructions-label");
   if (!modal || !ta) return;
   _regenTargetEntryId = entryId;
+  _regenIsBlocked = !!isBlocked;
   ta.value = "";
   if (target) {
     target.textContent = slotLabel ? `Target: scene slot ${slotLabel}` : "";
+  }
+  if (hint) {
+    hint.textContent = isBlocked
+      ? "This image was blocked by OpenAI's content policy. Describe a completely safe visual replacement — avoid any sensitive wording. Your description will be used to generate the new image."
+      : "Describe what you want changed — the AI will refine the prompt while keeping the scene's style and era.";
+    hint.className = isBlocked ? "regen-hint regen-hint--blocked" : "regen-hint";
+  }
+  if (label) {
+    label.textContent = isBlocked ? "Safe visual description for the new image:" : "Instructions for the new image:";
   }
   modal.hidden = false;
   ta.focus();
