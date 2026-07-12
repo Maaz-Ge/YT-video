@@ -1786,6 +1786,15 @@ function initSingleImageStudio() {
       deleteSingle(del.dataset.id);
       return;
     }
+    const toggle = e.target.closest(".btn-toggle-prompt");
+    if (toggle) {
+      const promptEl = toggle.closest(".single-card-prompt");
+      const expanded = toggle.dataset.expanded === "1";
+      toggle.dataset.expanded = expanded ? "0" : "1";
+      toggle.textContent = expanded ? "Show full prompt" : "Show less";
+      if (promptEl) promptEl.classList.toggle("single-card-prompt--full", !expanded);
+      return;
+    }
     const img = e.target.closest(".single-card-img");
     if (img) {
       openSingleLightbox(img.getAttribute("data-full-src") || img.src, img.alt || "");
@@ -1929,10 +1938,19 @@ function updateSingleCard(node, img) {
       <button type="button" class="btn btn-ghost btn-sm btn-delete-single" data-id="${escapeAttr(img.id)}">Delete</button>
     </div>`;
 
+  const prompt = img.prompt || "";
+  const isLong = prompt.length > 180;
+  const promptHtml = isLong
+    ? `<p class="single-card-prompt">
+        <span class="single-prompt-text">${escapeHTML(prompt)}</span>
+        <button type="button" class="btn-toggle-prompt" data-expanded="0">Show full prompt</button>
+      </p>`
+    : `<p class="single-card-prompt single-card-prompt--full"><span class="single-prompt-text">${escapeHTML(prompt)}</span></p>`;
+
   node.innerHTML = `
     ${media}
     <div class="single-card-body">
-      <p class="single-card-prompt">${escapeHTML(img.prompt || "")}</p>
+      ${promptHtml}
       <div class="single-card-meta">
         <span class="single-card-tag">${escapeHTML(img.resolution || "")}</span>
         <span class="single-card-tag">${escapeHTML(img.quality || "")}</span>

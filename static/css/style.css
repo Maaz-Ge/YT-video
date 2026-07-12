@@ -2581,11 +2581,31 @@ body.body-lock { overflow: hidden; }
   font-size: 0.85rem;
   color: var(--text-1);
   line-height: 1.5;
+}
+.single-card-prompt .single-prompt-text {
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.single-card-prompt--full .single-prompt-text {
+  display: block;
+  -webkit-line-clamp: none;
+  overflow: visible;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.btn-toggle-prompt {
+  margin-top: 0.35rem;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--ff-body);
+  font-size: 0.78rem;
+  color: var(--gold-light);
+}
+.btn-toggle-prompt:hover { text-decoration: underline; }
 .single-card-meta {
   display: flex;
   gap: var(--sp-sm);
