@@ -1005,6 +1005,82 @@ def generate_all_images(
     return [results[s["entry_id"]] for s in scenes], summary
 
 
+# ─── 4b. Standalone single-image generation (raw prompt, no style) ───────────
+
+def generate_single_image(
+    prompt: str,
+    quality: str,
+    resolution: str,
+    out_path: Path,
+) -> tuple[Path, float]:
+    """
+    Generate one image from a raw user prompt via gpt-image-2.
+
+    Unlike generate_image(), this applies NO Tatterveil style, NO negative
+    constraints, and NO content-safety rewrite — the prompt is passed through
+    verbatim. Content-policy failures are re-raised so the caller can surface
+    them to the user. 16:9 is enforced by the resolution presets (all 16:9).
+    """
+    text = (prompt or "").strip()
+    if not text:
+        raise ValueError("Prompt is required.")
+
+    if resolution not in config.RESOLUTION_PRESETS:
+        resolution = config.DEFAULT_RESOLUTION
+    if quality not in config.QUALITY_OPTIONS:
+        quality = config.DEFAULT_QUALITY
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    client = _get_client()
+    started_at = time.monotonic()
+    last_exc: Exception | None = None
+
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            response = client.images.generate(
+                model=config.IMAGE_MODEL,
+                prompt=text,
+                n=1,
+                size=resolution,
+                quality=quality,
+            )
+            image_b64 = response.data[0].b64_json
+            image_bytes = base64.b64decode(image_b64)
+            out_path.write_bytes(image_bytes)
+
+            try:
+                from engine.thumbnails import ensure_thumbnail
+
+                ensure_thumbnail(out_path)
+            except Exception as exc:
+                logger.warning("Preview thumbnail failed for %s: %s", out_path.name, exc)
+
+            elapsed = time.monotonic() - started_at
+            logger.info(
+                f"Single image saved → {out_path.name}  "
+                f"({elapsed:.1f}s, {resolution}, q={quality})"
+            )
+            return out_path, elapsed
+
+        except Exception as exc:
+            last_exc = exc
+            if is_content_policy_error(exc):
+                raise ContentPolicyError(
+                    "Image blocked by content safety filters. Revise the prompt and try again.",
+                    stage="single_image",
+                ) from exc
+            logger.warning(
+                f"Single image attempt {attempt + 1}/{config.MAX_RETRIES} failed: {exc}"
+            )
+            if attempt < config.MAX_RETRIES - 1:
+                time.sleep(config.RETRY_DELAY * (attempt + 1))
+
+    raise RuntimeError(
+        f"Single image generation failed after {config.MAX_RETRIES} attempts: {last_exc}"
+    )
+
+
 # ─── 5. Prompt refinement (regenerate image) ─────────────────────────────────
 
 REFINE_PROMPT_SYSTEM = """You revise image-generation prompts for a documentary-style YouTube visual pipeline.

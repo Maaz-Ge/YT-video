@@ -1729,12 +1729,273 @@ function escapeAttr(str) {
   return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+/* ── Single Image studio ──────────────────────────────────────────────────── */
+
+let _singlesPollTimer = null;
+
+function initSingleImageStudio() {
+  const form = document.getElementById("single-form");
+  const gallery = document.getElementById("single-gallery");
+  if (!form || !gallery) return;
+
+  initStudioModeTabs();
+  initSingleLightbox();
+
+  const submitBtn = document.getElementById("single-submit-btn");
+  const spinner = document.getElementById("single-submit-spinner");
+  const label = document.getElementById("single-submit-label");
+  const promptEl = document.getElementById("single_prompt");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const prompt = (promptEl.value || "").trim();
+    if (!prompt) {
+      showToast("Enter a prompt to generate an image.", "error");
+      return;
+    }
+    const resolution = getSingleResolution();
+    const quality = getSingleQuality();
+
+    if (submitBtn) submitBtn.disabled = true;
+    if (spinner) spinner.classList.remove("hidden");
+    if (label) label.textContent = "Adding to queue…";
+
+    try {
+      const res = await fetch("/api/singles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, resolution, quality }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Generation request failed");
+      showToast("Added to the image queue.", "ok", 3500);
+      promptEl.value = "";
+      pollSingles();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+
+    if (submitBtn) submitBtn.disabled = false;
+    if (spinner) spinner.classList.add("hidden");
+    if (label) label.textContent = "Generate Image";
+  });
+
+  gallery.addEventListener("click", (e) => {
+    const del = e.target.closest(".btn-delete-single");
+    if (del) {
+      deleteSingle(del.dataset.id);
+      return;
+    }
+    const img = e.target.closest(".single-card-img");
+    if (img) {
+      openSingleLightbox(img.getAttribute("data-full-src") || img.src, img.alt || "");
+    }
+  });
+
+  pollSingles();
+}
+
+function initStudioModeTabs() {
+  const tabs = document.querySelectorAll(".studio-mode-tab");
+  const batch = document.getElementById("mode-batch");
+  const single = document.getElementById("mode-single");
+  if (!tabs.length || !batch || !single) return;
+
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const mode = tab.getAttribute("data-mode");
+      tabs.forEach((t) => {
+        const on = t === tab;
+        t.classList.toggle("active", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      const isSingle = mode === "single";
+      batch.hidden = isSingle;
+      single.hidden = !isSingle;
+    });
+  });
+}
+
+function getSingleResolution() {
+  const el = document.querySelector('input[name="single_resolution"]:checked');
+  return el ? el.value : "2048x1152";
+}
+
+function getSingleQuality() {
+  const el = document.querySelector('input[name="single_quality"]:checked');
+  return el ? el.value : "medium";
+}
+
+async function pollSingles() {
+  const gallery = document.getElementById("single-gallery");
+  if (!gallery) return;
+  clearTimeout(_singlesPollTimer);
+
+  try {
+    const res = await fetch("/api/singles");
+    if (!res.ok) {
+      _singlesPollTimer = setTimeout(pollSingles, 8000);
+      return;
+    }
+    const data = await res.json();
+    const images = data.images || [];
+    renderSinglesGallery(images);
+    updateSingleQueueInfo(data);
+
+    const busy = images.some((i) => i.status === "pending" || i.status === "generating");
+    if (busy) _singlesPollTimer = setTimeout(pollSingles, 2500);
+  } catch (e) {
+    _singlesPollTimer = setTimeout(pollSingles, 8000);
+  }
+}
+
+function updateSingleQueueInfo(data) {
+  const info = document.getElementById("single-queue-info");
+  const activeEl = document.getElementById("single-active-count");
+  const maxEl = document.getElementById("single-max-parallel");
+  if (!info) return;
+  const active = data.active_count || 0;
+  if (activeEl) activeEl.textContent = active;
+  if (maxEl && data.max_parallel) maxEl.textContent = data.max_parallel;
+  info.hidden = active === 0;
+}
+
+function renderSinglesGallery(images) {
+  const gallery = document.getElementById("single-gallery");
+  const empty = document.getElementById("single-gallery-empty");
+  if (!gallery) return;
+
+  if (empty) empty.hidden = images.length > 0;
+
+  const existing = new Map();
+  gallery.querySelectorAll(".single-card").forEach((node) => {
+    existing.set(node.dataset.id, node);
+  });
+
+  const wanted = new Set(images.map((i) => i.id));
+  existing.forEach((node, id) => {
+    if (!wanted.has(id)) node.remove();
+  });
+
+  images.forEach((img) => {
+    let node = existing.get(img.id);
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "single-card";
+      node.dataset.id = img.id;
+      gallery.appendChild(node);
+    }
+    updateSingleCard(node, img);
+  });
+
+  // Keep newest first (API already sorts; reorder DOM to match).
+  images.forEach((img) => {
+    const node = gallery.querySelector(`.single-card[data-id="${CSS.escape(img.id)}"]`);
+    if (node) gallery.appendChild(node);
+  });
+}
+
+function updateSingleCard(node, img) {
+  const status = img.status || "pending";
+  node.dataset.status = status;
+
+  let media;
+  if (status === "done" && img.preview_url) {
+    media = `
+      <div class="single-card-media">
+        <img class="single-card-img" src="${escapeAttr(img.preview_url)}" data-full-src="${escapeAttr(img.image_url)}" alt="${escapeAttr(img.prompt)}" loading="lazy" />
+      </div>`;
+  } else if (status === "error") {
+    media = `
+      <div class="single-card-media single-card-media--error">
+        <span class="single-card-error-icon">!</span>
+        <span class="single-card-error-text">${escapeHTML(img.error || "Generation failed")}</span>
+      </div>`;
+  } else {
+    media = `
+      <div class="single-card-media single-card-media--pending">
+        <span class="spinner"></span>
+        <span class="single-card-pending-text">${status === "generating" ? "Generating…" : "Queued…"}</span>
+      </div>`;
+  }
+
+  const actions = `
+    <div class="single-card-actions">
+      ${
+        status === "done" && img.download_url
+          ? `<a class="btn btn-ghost btn-sm" href="${escapeAttr(img.download_url)}" download>Download</a>`
+          : ""
+      }
+      <button type="button" class="btn btn-ghost btn-sm btn-delete-single" data-id="${escapeAttr(img.id)}">Delete</button>
+    </div>`;
+
+  node.innerHTML = `
+    ${media}
+    <div class="single-card-body">
+      <p class="single-card-prompt">${escapeHTML(img.prompt || "")}</p>
+      <div class="single-card-meta">
+        <span class="single-card-tag">${escapeHTML(img.resolution || "")}</span>
+        <span class="single-card-tag">${escapeHTML(img.quality || "")}</span>
+      </div>
+      ${actions}
+    </div>`;
+}
+
+async function deleteSingle(id) {
+  if (!id) return;
+  if (!confirm("Delete this image?")) return;
+  try {
+    const res = await fetch(`/api/singles/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Delete failed");
+    const node = document.querySelector(`.single-card[data-id="${CSS.escape(id)}"]`);
+    if (node) node.remove();
+    pollSingles();
+  } catch (e) {
+    showToast("Delete failed.", "error");
+  }
+}
+
+function initSingleLightbox() {
+  const lb = document.getElementById("single-lightbox");
+  const close = document.getElementById("single-lightbox-close");
+  if (!lb || !close) return;
+  close.addEventListener("click", closeSingleLightbox);
+  lb.addEventListener("click", (e) => {
+    if (e.target === lb) closeSingleLightbox();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!lb.hidden && e.key === "Escape") closeSingleLightbox();
+  });
+}
+
+function openSingleLightbox(src, alt) {
+  const lb = document.getElementById("single-lightbox");
+  const img = document.getElementById("single-lightbox-image");
+  const cap = document.getElementById("single-lightbox-caption");
+  if (!lb || !img || !src) return;
+  img.src = src;
+  img.alt = alt || "";
+  if (cap) cap.textContent = alt || "";
+  lb.hidden = false;
+  document.body.classList.add("body-lock");
+}
+
+function closeSingleLightbox() {
+  const lb = document.getElementById("single-lightbox");
+  if (!lb) return;
+  lb.hidden = true;
+  document.body.classList.remove("body-lock");
+  const img = document.getElementById("single-lightbox-image");
+  if (img) img.src = "";
+}
+
 /* ── Bootstrap ────────────────────────────────────────────────────────────── */
 
 document.addEventListener("DOMContentLoaded", () => {
   initEstimatePanel();
   initCreateForm();
   initHomePage();
+  initSingleImageStudio();
   initProjectPage();
   initDeleteButton();
 

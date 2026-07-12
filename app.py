@@ -1438,6 +1438,114 @@ def _run_regen_job(job_id: str) -> None:
                           stage_message="Job crashed", error=str(exc))
 
 
+# ─── Single-image studio (standalone, raw prompt, 3 in parallel) ─────────────
+
+_singles_lock = threading.Lock()
+_single_executor_lock = threading.Lock()
+_single_executor: ThreadPoolExecutor | None = None
+
+
+def _get_single_executor() -> ThreadPoolExecutor:
+    global _single_executor
+    with _single_executor_lock:
+        if _single_executor is None:
+            _single_executor = ThreadPoolExecutor(
+                max_workers=max(1, int(config.SINGLE_IMAGE_PARALLELISM)),
+                thread_name_prefix="single",
+            )
+        return _single_executor
+
+
+def _singles_path() -> Path:
+    return config.SINGLES_DIR / "singles.json"
+
+
+def _load_singles() -> list[dict]:
+    p = _singles_path()
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def _save_singles(records: list[dict]) -> None:
+    try:
+        _singles_path().write_text(json.dumps(records, indent=2), encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to persist singles.json")
+
+
+def _update_single_record(image_id: str, **fields) -> dict | None:
+    """Read-modify-write a single record under the singles lock."""
+    with _singles_lock:
+        records = _load_singles()
+        for rec in records:
+            if rec.get("id") == image_id:
+                rec.update(fields)
+                rec["updated_at"] = time.time()
+                _save_singles(records)
+                return dict(rec)
+    return None
+
+
+def _run_single_job(image_id: str) -> None:
+    """Worker: render one single image from its raw prompt."""
+    with _singles_lock:
+        records = _load_singles()
+        rec = next((r for r in records if r.get("id") == image_id), None)
+        if rec is None:
+            return
+        prompt = rec.get("prompt") or ""
+        quality = rec.get("quality") or config.DEFAULT_QUALITY
+        resolution = rec.get("resolution") or config.DEFAULT_RESOLUTION
+        filename = rec.get("image_filename") or f"single_{image_id}.png"
+
+    _update_single_record(image_id, status="generating")
+
+    out_path = config.SINGLES_DIR / "images" / filename
+    try:
+        _, elapsed = pipeline.generate_single_image(
+            prompt=prompt,
+            quality=quality,
+            resolution=resolution,
+            out_path=out_path,
+        )
+        _update_single_record(
+            image_id,
+            status="done",
+            image_path=f"images/{filename}",
+            image_seconds=round(elapsed, 2),
+            error=None,
+        )
+    except Exception as exc:
+        logger.error("Single image %s failed: %s", image_id, exc, exc_info=True)
+        _update_single_record(image_id, status="error", error=str(exc))
+
+
+def _single_public(rec: dict) -> dict:
+    """Client-facing view of a single-image record (adds preview/full/download URLs)."""
+    out = {
+        "id": rec.get("id"),
+        "prompt": rec.get("prompt", ""),
+        "resolution": rec.get("resolution"),
+        "quality": rec.get("quality"),
+        "status": rec.get("status", "pending"),
+        "error": rec.get("error"),
+        "created_at": rec.get("created_at"),
+        "updated_at": rec.get("updated_at"),
+    }
+    fn = rec.get("image_filename")
+    if rec.get("status") == "done" and fn:
+        out["image_url"] = f"/singles/images/{fn}"
+        out["preview_url"] = f"/singles/previews/{fn}"
+        out["download_url"] = f"/singles/download/{fn}"
+    return out
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -1789,6 +1897,128 @@ def api_dismiss_regen_job(project_id: str, job_id: str):
             )
         _regen_jobs.pop(job_id, None)
     return jsonify({"ok": True})
+
+
+# ─── Single-image studio routes ──────────────────────────────────────────────
+
+@app.route("/api/singles", methods=["GET"])
+def api_list_singles():
+    """List all single images (newest first) + queue parallelism info."""
+    with _singles_lock:
+        records = _load_singles()
+    records.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+    items = [_single_public(r) for r in records]
+    active = sum(1 for r in records if r.get("status") in ("pending", "generating"))
+    return jsonify(
+        {
+            "images": items,
+            "active_count": active,
+            "max_parallel": int(config.SINGLE_IMAGE_PARALLELISM),
+        }
+    )
+
+
+@app.route("/api/singles", methods=["POST"])
+def api_create_single():
+    """Queue a standalone single-image render. Up to SINGLE_IMAGE_PARALLELISM run in parallel."""
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    quality = data.get("quality", config.DEFAULT_QUALITY)
+    resolution = data.get("resolution", config.DEFAULT_RESOLUTION)
+
+    if not prompt:
+        return jsonify({"error": "Prompt is required."}), 400
+    if quality not in config.QUALITY_OPTIONS:
+        return jsonify({"error": f"Invalid quality. Choose: {list(config.QUALITY_OPTIONS)}"}), 400
+    if resolution not in config.RESOLUTION_PRESETS:
+        return jsonify({"error": f"Invalid resolution. Choose: {list(config.RESOLUTION_PRESETS)}"}), 400
+
+    image_id = uuid.uuid4().hex
+    now = time.time()
+    record = {
+        "id": image_id,
+        "prompt": prompt,
+        "resolution": resolution,
+        "quality": quality,
+        "status": "pending",
+        "image_filename": f"single_{image_id}.png",
+        "image_path": None,
+        "image_seconds": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _singles_lock:
+        records = _load_singles()
+        records.append(record)
+        _save_singles(records)
+
+    _get_single_executor().submit(_run_single_job, image_id)
+    return jsonify({"ok": True, "image": _single_public(record)})
+
+
+@app.route("/api/singles/<image_id>", methods=["DELETE"])
+def api_delete_single(image_id: str):
+    """Remove a single-image record and its files."""
+    with _singles_lock:
+        records = _load_singles()
+        rec = next((r for r in records if r.get("id") == image_id), None)
+        if rec is None:
+            abort(404)
+        kept = [r for r in records if r.get("id") != image_id]
+        _save_singles(kept)
+
+    fn = rec.get("image_filename")
+    if fn:
+        img_path = config.SINGLES_DIR / "images" / Path(fn).name
+        for p in (img_path, thumbnails.thumb_path_for(img_path)):
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    return jsonify({"ok": True})
+
+
+@app.route("/singles/images/<filename>")
+def serve_single_image(filename: str):
+    img_path = config.SINGLES_DIR / "images" / Path(filename).name
+    if not img_path.exists():
+        abort(404)
+    mime = "image/png" if filename.lower().endswith(".png") else "image/jpeg"
+    resp = send_file(img_path, mimetype=mime, conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
+@app.route("/singles/previews/<filename>")
+def serve_single_preview(filename: str):
+    img_path = config.SINGLES_DIR / "images" / Path(filename).name
+    if not img_path.exists():
+        abort(404)
+    try:
+        thumb = thumbnails.ensure_thumbnail(img_path)
+    except Exception as exc:
+        logger.exception("Single preview generation failed for %s", filename)
+        abort(500, description=str(exc))
+    if thumb is None or not thumb.exists():
+        abort(404)
+    resp = send_file(thumb, mimetype="image/jpeg", conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
+@app.route("/singles/download/<filename>")
+def download_single_image(filename: str):
+    img_path = config.SINGLES_DIR / "images" / Path(filename).name
+    if not img_path.exists():
+        abort(404)
+    return send_file(
+        img_path,
+        mimetype="image/png",
+        as_attachment=True,
+        download_name=Path(filename).name,
+    )
 
 
 # ─── Export job endpoints (progress-aware) ───────────────────────────────────

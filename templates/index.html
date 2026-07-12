@@ -82,6 +82,19 @@
     <p class="section-label animate-fade-up">New Project</p>
     <h2 class="section-title animate-fade-up">Generate your scenes</h2>
 
+    <div class="studio-mode-tabs animate-fade-up" role="tablist" aria-label="Studio mode">
+      <button type="button" class="studio-mode-tab active" data-mode="batch" role="tab" aria-selected="true">
+        <span class="studio-mode-tab-title">Batch Generation</span>
+        <span class="studio-mode-tab-sub">Script → timed Tatterveil scenes</span>
+      </button>
+      <button type="button" class="studio-mode-tab" data-mode="single" role="tab" aria-selected="false">
+        <span class="studio-mode-tab-title">Single Image</span>
+        <span class="studio-mode-tab-sub">One prompt → one image</span>
+      </button>
+    </div>
+
+    <div id="mode-batch">
+
     <div
       id="generation-locked-banner"
       class="generation-locked-banner animate-fade-up"
@@ -418,8 +431,157 @@
       </aside>
 
     </div><!-- /form-layout -->
+
+    </div><!-- /#mode-batch -->
+
+    <!-- ── Single Image studio ─────────────────────────────────────────────── -->
+    <div id="mode-single" hidden>
+      <div class="single-studio animate-fade-up">
+        <form id="single-form" class="create-form single-form" novalidate>
+
+          <div class="form-group">
+            <div class="form-label-row">
+              <label class="form-label" for="single_prompt">Image Prompt</label>
+              <button type="button" class="info-btn"
+                data-tip="Describe exactly the image you want. This is a standalone generator — your prompt is sent as-is with no Tatterveil style or hidden instructions. Only the 16:9 aspect ratio is fixed.">
+                ⓘ How prompts work here
+              </button>
+            </div>
+            <textarea
+              id="single_prompt"
+              name="single_prompt"
+              class="form-textarea"
+              rows="5"
+              placeholder="e.g. A neon-lit Tokyo alley in the rain at night, cinematic, reflections on wet pavement…"
+              required
+            ></textarea>
+            <p class="single-note">Standalone image — no Tatterveil style applied. Aspect ratio is fixed at 16:9.</p>
+          </div>
+
+          <div class="config-row">
+            <div class="form-group form-group--sm">
+              <label class="form-label">Aspect Ratio</label>
+              <div class="locked-badge">
+                <span class="locked-icon">⬛</span>
+                16 : 9
+                <span class="locked-tag">only</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-row">
+            <div class="form-group form-group--lg">
+              <div class="form-label-row">
+                <label class="form-label">Resolution</label>
+                <button type="button" class="info-btn"
+                  data-tip="Image pixel size. All resolutions are true 16:9 landscape.&#10;&#10;HD 1280×720 — fastest&#10;2K 2048×1152 — balanced (recommended)&#10;4K Ultra 3840×2160 — maximum detail">
+                  ⓘ
+                </button>
+              </div>
+              <div class="resolution-selector" role="radiogroup" aria-label="Resolution">
+                <label class="res-option">
+                  <input type="radio" name="single_resolution" value="1280x720" />
+                  <span class="res-label">
+                    <span class="res-tier">HD</span>
+                    <span class="res-size">1280×720</span>
+                    <span class="res-note">Fastest</span>
+                  </span>
+                </label>
+                <label class="res-option">
+                  <input type="radio" name="single_resolution" value="2048x1152" checked />
+                  <span class="res-label">
+                    <span class="res-tier">2K</span>
+                    <span class="res-size">2048×1152</span>
+                    <span class="res-note">Balanced</span>
+                  </span>
+                </label>
+                <label class="res-option">
+                  <input type="radio" name="single_resolution" value="3840x2160" />
+                  <span class="res-label">
+                    <span class="res-tier">4K Ultra</span>
+                    <span class="res-size">3840×2160</span>
+                    <span class="res-note">Highest detail</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div class="form-group form-group--sm">
+              <div class="form-label-row">
+                <label class="form-label">Quality</label>
+                <button type="button" class="info-btn"
+                  data-tip="How much detail each image gets.&#10;&#10;Low — fastest, lowest cost&#10;Medium — balanced (recommended)&#10;High — maximum detail, highest cost">
+                  ⓘ
+                </button>
+              </div>
+              <div class="quality-selector" role="radiogroup" aria-label="Quality">
+                <label class="quality-option">
+                  <input type="radio" name="single_quality" value="low" />
+                  <span class="quality-label">
+                    <span class="quality-name">Low</span>
+                    <span class="quality-detail">Draft</span>
+                  </span>
+                </label>
+                <label class="quality-option">
+                  <input type="radio" name="single_quality" value="medium" checked />
+                  <span class="quality-label">
+                    <span class="quality-name">Medium</span>
+                    <span class="quality-detail">Balanced</span>
+                  </span>
+                </label>
+                <label class="quality-option">
+                  <input type="radio" name="single_quality" value="high" />
+                  <span class="quality-label">
+                    <span class="quality-name">High</span>
+                    <span class="quality-detail">Best</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-submit" id="single-submit-btn">
+            <span id="single-submit-label">Generate Image</span>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M3 9h12M11 5l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="single-submit-spinner" class="spinner hidden"></span>
+          </button>
+
+          <p class="single-queue-info" id="single-queue-info" hidden>
+            <span id="single-active-count">0</span> generating ·
+            up to <span id="single-max-parallel">3</span> render in parallel — the rest queue automatically.
+          </p>
+        </form>
+      </div>
+
+      <div class="single-gallery-wrap">
+        <div class="single-gallery-header">
+          <p class="section-label">Your images</p>
+          <h3 class="single-gallery-title">Generated single images</h3>
+        </div>
+        <p class="single-gallery-empty" id="single-gallery-empty">
+          No single images yet. Write a prompt above and generate your first one.
+        </p>
+        <div class="single-gallery" id="single-gallery"></div>
+      </div>
+    </div><!-- /#mode-single -->
+
   </div>
 </section>
+
+<!-- Lightbox for single-image full view -->
+<div id="single-lightbox" class="lightbox-overlay" hidden>
+  <button type="button" class="lightbox-close" id="single-lightbox-close" aria-label="Close enlarged image">
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M4 4l10 10M14 4L4 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+  </button>
+  <figure class="lightbox-figure">
+    <img id="single-lightbox-image" alt="" />
+    <figcaption id="single-lightbox-caption" class="lightbox-caption"></figcaption>
+  </figure>
+</div>
 
 <div id="cost-confirm-modal" class="modal-overlay" hidden>
   <div class="modal-card modal-card--wide">
