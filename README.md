@@ -264,6 +264,40 @@ If all attempts fail the scene is marked `error` and generation continues for re
 
 ---
 
+## Single Image Studio (standalone)
+
+A separate, self-contained generator for one-off images that has **nothing to do
+with the Tatterveil batch pipeline** — no script, no voice-over, no scene timeline.
+
+On the Studio landing page a two-tab switch lets you pick **Batch Generation**
+(the default script → scenes flow) or **Single Image**.
+
+In the Single Image tab you provide:
+
+- **Prompt** — sent to `gpt-image-2` **verbatim**. No Tatterveil style, no negative
+  constraints, and no content-safety rewrite are added. You get exactly what you ask for.
+- **Resolution** and **Quality** — the same options as batch generation.
+- **Aspect ratio** is fixed at **16:9** (enforced by the resolution presets).
+
+Behaviour:
+
+- Generate as many images as you like. **Up to 3 render in parallel**
+  (`SINGLE_IMAGE_PARALLELISM`, default 3) via a shared thread pool; the rest queue
+  automatically — the same queue model as regeneration.
+- Each image appears as a card with the **image**, its **prompt** (in a
+  `View image prompt` dropdown), and **Download** / **Delete** buttons. Click an
+  image to open it full-screen in the lightbox.
+- If a prompt is blocked by OpenAI's content policy, that card shows an **error**
+  (the prompt is *not* auto-rewritten) — edit your wording and generate again.
+- Images **persist across restarts** (stored in `singles/singles.json` + `singles/images/`)
+  until you delete them.
+
+Single images live in their own `singles/` directory, completely separate from
+`projects/`, so they never appear in the project list or affect the batch
+"only one project generating at a time" lock.
+
+---
+
 ## Cost preview & confirmation
 
 The system uses the OpenAI image price table:
@@ -335,6 +369,12 @@ Click any completed scene image (or its **Enlarge** button) to open a full-scree
 | `GET` | `/projects/<id>` | Project view page |
 | `GET` | `/projects/<id>/images/<filename>` | Serve generated image (PNG) |
 | `DELETE` | `/api/projects/<id>` | Delete project + all files |
+| `POST` | `/api/singles` | Queue a standalone single image (up to 3 run in parallel) |
+| `GET` | `/api/singles` | List single images (newest first) + queue info |
+| `DELETE` | `/api/singles/<image_id>` | Delete one single image + its files |
+| `GET` | `/singles/images/<filename>` | Serve a single image (PNG) |
+| `GET` | `/singles/previews/<filename>` | Serve a single-image JPEG preview |
+| `GET` | `/singles/download/<filename>` | Download a single image (attachment) |
 
 See **`technicalguide.md`** for the full data model and worker flow.
 
@@ -352,6 +392,12 @@ projects/
         ├── scene_001.png
         ├── scene_002_v1.png   # optional extra variant after regenerate
         └── ...
+
+singles/                       # standalone Single Image Studio (separate from projects/)
+├── singles.json               # array of single-image records (prompt, status, …)
+└── images/
+    ├── single_<id>.png
+    └── thumbs/<id>.jpg         # grid previews
 ```
 
 ---
@@ -384,6 +430,7 @@ The system enforces all of the following on every generated image:
 | `FIRST_SEGMENT` | `5` | Minutes before scene-rate switches |
 | `MAX_WORKERS` | `3` | Parallel image generation threads (initial run) |
 | `REGEN_PARALLELISM` | `4` | Max concurrent regeneration image renders |
+| `SINGLE_IMAGE_PARALLELISM` | `3` | Max concurrent Single Image Studio renders |
 | `IMAGE_COSTS` | *(table above)* | Per-image USD price by resolution × quality |
 | `PROMPT_GENERATION_FLAT_COST` | `1.00` | Flat per-project overhead added to cost preview |
 | `MAX_RETRIES` | `3` | Retry attempts per image |

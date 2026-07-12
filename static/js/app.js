@@ -1786,15 +1786,6 @@ function initSingleImageStudio() {
       deleteSingle(del.dataset.id);
       return;
     }
-    const toggle = e.target.closest(".btn-toggle-prompt");
-    if (toggle) {
-      const promptEl = toggle.closest(".single-card-prompt");
-      const expanded = toggle.dataset.expanded === "1";
-      toggle.dataset.expanded = expanded ? "0" : "1";
-      toggle.textContent = expanded ? "Show full prompt" : "Show less";
-      if (promptEl) promptEl.classList.toggle("single-card-prompt--full", !expanded);
-      return;
-    }
     const img = e.target.closest(".single-card-img");
     if (img) {
       openSingleLightbox(img.getAttribute("data-full-src") || img.src, img.alt || "");
@@ -1893,6 +1884,10 @@ function renderSinglesGallery(images) {
       node.className = "single-card";
       node.dataset.id = img.id;
       gallery.appendChild(node);
+    } else if (node.dataset.status === "done" && img.status === "done") {
+      // Already fully rendered — don't rewrite, so an open prompt dropdown
+      // stays open across polling refreshes.
+      return;
     }
     updateSingleCard(node, img);
   });
@@ -1939,13 +1934,18 @@ function updateSingleCard(node, img) {
     </div>`;
 
   const prompt = img.prompt || "";
-  const isLong = prompt.length > 180;
-  const promptHtml = isLong
-    ? `<p class="single-card-prompt">
-        <span class="single-prompt-text">${escapeHTML(prompt)}</span>
-        <button type="button" class="btn-toggle-prompt" data-expanded="0">Show full prompt</button>
-      </p>`
-    : `<p class="single-card-prompt single-card-prompt--full"><span class="single-prompt-text">${escapeHTML(prompt)}</span></p>`;
+  const promptHtml = `
+    <details class="scene-prompt-details single-prompt-details">
+      <summary class="scene-prompt-toggle">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        View image prompt
+      </summary>
+      <div class="scene-prompt-body">
+        <p class="scene-prompt-text">${escapeHTML(prompt)}</p>
+      </div>
+    </details>`;
 
   node.innerHTML = `
     ${media}

@@ -18,6 +18,7 @@ This document explains how each major subsystem fits together end-to-end: data m
 | `templates/` | Jinja HTML; `project.html` SSR scene cards + modal + a single combined-voice-over `<audio>` player. |
 | `static/js/app.js` | Form handling, polling, grid sync, regenerate modal, export download, combined voice-over player sync. |
 | `projects/<id>/` | Per-project folder: `meta.json`, `status.json`, `scenes.json`, `timing.json`, `images/`, `voiceovers/`. |
+| `singles/` | Standalone **Single Image Studio** store (separate from projects): `singles.json` + `images/`. See §15. |
 
 ---
 
@@ -275,6 +276,12 @@ ZIP contents:
 | DELETE | `/api/projects/<id>/regenerations/<job_id>` | Dismiss a finished regeneration job. |
 | DELETE | `/api/projects/<id>/scenes/<entry_id>` | Remove one variant row + image. |
 | DELETE | `/api/projects/<id>` | Delete entire project directory. |
+| POST | `/api/singles` | Queue a standalone single image (see §15). |
+| GET | `/api/singles` | List single images (newest first) + `{active_count, max_parallel}`. |
+| DELETE | `/api/singles/<image_id>` | Delete one single-image record + its PNG/thumbnail. |
+| GET | `/singles/images/<filename>` | Serve a single-image PNG. |
+| GET | `/singles/previews/<filename>` | Serve a single-image JPEG preview. |
+| GET | `/singles/download/<filename>` | Download a single image (attachment). |
 
 ---
 
@@ -297,6 +304,7 @@ ZIP contents:
 - `_scene_lock(project_id)` (lazy per-project `threading.Lock`) wraps every read-modify-write on `scenes.json` performed by regeneration workers so concurrent jobs cannot race on `next_variant_index()` or clobber each other's writes.
 - The regeneration `ThreadPoolExecutor` is process-global; it's reused across requests via a guarded `_get_regen_executor()` (lazy init under `_regen_executor_lock`).
 - Initial-generation image renders still go through `engine.pipeline.generate_all_images()`'s own `ThreadPoolExecutor(MAX_WORKERS)`. The two pools are independent.
+- The Single Image Studio uses a **third**, independent process-global pool via `_get_single_executor()` (`SINGLE_IMAGE_PARALLELISM` workers). Read-modify-write on `singles.json` is guarded by `_singles_lock`.
 
 ---
 
@@ -309,6 +317,7 @@ ZIP contents:
 - `VOICE_MAX_CHARS` (default `9000`) — max characters per ElevenLabs request (hard cap is 10,000). The script is chunked below this and stitched together.
 - `OPENAI_TEXT_MODEL`, `IMAGE_MODEL` override defaults (`config.py`).
 - `REGEN_PARALLELISM` (default `4`) — max concurrent regeneration image renders.
+- `SINGLE_IMAGE_PARALLELISM` (default `3`) — max concurrent Single Image Studio renders (see §15).
 - `WORDS_PER_MINUTE` (default `150`) — **preview only**. The real duration comes from the measured voice-over; this constant just powers the pre-generation scene-count + cost estimate.
 - `IMAGE_COSTS` and `PROMPT_GENERATION_FLAT_COST` — pricing inputs for the cost preview (voice-over cost is governed by your ElevenLabs plan and is not included in this estimate).
 - `.env` is loaded from this package directory or sibling `image_generator/.env`.
@@ -323,5 +332,71 @@ ZIP contents:
 - Export job missing ffmpeg → job ends with `status="error"`, `stage="failed"`. ffmpeg is required for the MP4 chunks; the combined audio is already a WAV and is bundled as-is (no transcode).
 - Regeneration jobs that fail mid-flight leave the new variant row with `image_status="error"`; the user can delete the failed variant. The combined voice-over is project-level, so regenerating an image never touches the audio.
 - Export ZIPs live in the system temp directory and are auto-cleaned 30 min after the job finishes.
+- A Single Image blocked by content policy is left with `status="error"` and the error message; nothing is auto-rewritten (see §15).
+
+---
+
+## 15. Single Image Studio (standalone)
+
+A self-contained one-off image generator that shares none of the batch pipeline
+(no script, voice, scenes, timeline, or Tatterveil style). Implemented in
+`app.py` (registry + routes + worker) and `engine/pipeline.py` (`generate_single_image`).
+
+### Storage
+
+`config.SINGLES_DIR` (`singles/`, a sibling of `projects/`, **not** inside it — so
+`_list_projects()` / `_find_active_generation()` never see it and the batch
+"one project generating at a time" lock is unaffected):
+
+```
+singles/
+  singles.json            # array of records (source of truth, persisted)
+  images/
+    single_<id>.png
+    thumbs/<id>.jpg        # grid preview (engine.thumbnails)
+```
+
+### Record model (`singles.json`)
+
+| Field | Meaning |
+|-------|---------|
+| `id` | UUID hex; primary key for DOM, API, filename. |
+| `prompt` | Raw user prompt, sent to `gpt-image-2` verbatim. |
+| `resolution`, `quality` | Same option sets as batch; 16:9 enforced by the resolution presets. |
+| `status` | `pending` → `generating` → `done` / `error`. |
+| `image_filename` | `single_<id>.png`. |
+| `image_path` | `images/single_<id>.png` once done. |
+| `image_seconds`, `error` | Render time / failure message. |
+| `created_at`, `updated_at` | Wall-clock timestamps (list is served newest-first). |
+
+### Flow
+
+```
+POST /api/singles → append pending record → submit _run_single_job to
+_get_single_executor() (SINGLE_IMAGE_PARALLELISM workers)
+  → status=generating
+  → pipeline.generate_single_image(prompt, quality, resolution, out_path)
+        (no _build_final_prompt, no negatives, no safety rewrite;
+         content-policy errors raise ContentPolicyError)
+  → status=done (+ image_path, image_seconds)  |  status=error (+ error)
+```
+
+Users can enqueue unlimited images; up to `SINGLE_IMAGE_PARALLELISM` (default 3)
+render at once, the rest wait. `_update_single_record()` performs each
+read-modify-write under `_singles_lock`.
+
+### Frontend (`static/js/app.js` → `initSingleImageStudio`)
+
+- A **Batch Generation / Single Image** tab switch on the landing page toggles
+  `#mode-batch` / `#mode-single`. The single form uses `single_resolution` /
+  `single_quality` radio names so the batch selectors (`getSelectedResolution()`,
+  which query `input[name="resolution"]`) are untouched.
+- `pollSingles()` polls `GET /api/singles` on an adaptive interval — fast while any
+  record is `pending`/`generating`, stops when idle.
+- `renderSinglesGallery()` reconciles cards by `id`. **Cards already in `done`
+  state are not re-rendered**, so an open prompt dropdown survives polling refreshes.
+  Each done card shows the preview image, a `View image prompt` `<details>` dropdown
+  (reusing `.scene-prompt-details`), and Download / Delete; a click on the image
+  opens the shared lightbox.
 
 This should be enough for a new engineer to trace any request from the browser → JSON stores → worker threads → OpenAI APIs → filesystem.
