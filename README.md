@@ -298,6 +298,39 @@ Single images live in their own `singles/` directory, completely separate from
 
 ---
 
+## Single Voice Studio (standalone)
+
+A separate generator for one-off **voice-overs only** — no images, no scenes, no
+timeline. Selectable from the same Studio tab switch as **Batch Generation** and
+**Single Image**.
+
+In the Single Voice tab you provide:
+
+- **Script** — the full narration to speak.
+- **Narration speed** — the same 0.25–1.0 slider used by batch generation.
+
+The voice engine, ElevenLabs settings, and chunk-and-stitch logic are **identical
+to the batch pipeline** — it calls the same `engine.voice.generate_voice_with_timestamps()`.
+Long scripts are split into sentence-aligned chunks, each sent to ElevenLabs
+`/with-timestamps`, then concatenated with ffmpeg into **one combined WAV**
+(`full_voiceover.wav`).
+
+Behaviour:
+
+- Generate as many clips as you like. **Up to `SINGLE_VOICE_PARALLELISM` (default 2)**
+  render in parallel via a shared thread pool; the rest queue automatically.
+- Each clip appears as a card with an inline **audio player**, a `View script`
+  dropdown, duration / chunk / speed tags, and **Download** / **Delete** buttons.
+  While rendering, the card shows live `Chunk X of Y…` progress.
+- Requires `ELEVEN_API_KEY`; without it the request is rejected. If a render
+  fails, the card shows the error and can be deleted.
+- Clips **persist across restarts** (each stored in `voices/<id>/`) until deleted.
+
+Like single images, voice-overs live outside `projects/` and never affect the
+batch project list or generation lock. **ffmpeg is required** (same as batch voice).
+
+---
+
 ## Cost preview & confirmation
 
 The system uses the OpenAI image price table:
@@ -375,6 +408,11 @@ Click any completed scene image (or its **Enlarge** button) to open a full-scree
 | `GET` | `/singles/images/<filename>` | Serve a single image (PNG) |
 | `GET` | `/singles/previews/<filename>` | Serve a single-image JPEG preview |
 | `GET` | `/singles/download/<filename>` | Download a single image (attachment) |
+| `POST` | `/api/voices` | Queue a standalone voice-over (up to 2 run in parallel) |
+| `GET` | `/api/voices` | List voice-overs (newest first) + queue info |
+| `DELETE` | `/api/voices/<voice_id>` | Delete one voice-over + its directory |
+| `GET` | `/voices/<voice_id>/audio` | Stream a voice-over WAV |
+| `GET` | `/voices/<voice_id>/download` | Download a voice-over (attachment) |
 
 See **`technicalguide.md`** for the full data model and worker flow.
 
@@ -398,6 +436,12 @@ singles/                       # standalone Single Image Studio (separate from p
 └── images/
     ├── single_<id>.png
     └── thumbs/<id>.jpg         # grid previews
+
+voices/                        # standalone Single Voice Studio (separate from projects/)
+├── voices.json                # array of voice records (script, status, duration, …)
+└── <voice_id>/
+    ├── voiceovers/full_voiceover.wav
+    └── sentence_timeline.json
 ```
 
 ---
@@ -431,6 +475,7 @@ The system enforces all of the following on every generated image:
 | `MAX_WORKERS` | `3` | Parallel image generation threads (initial run) |
 | `REGEN_PARALLELISM` | `4` | Max concurrent regeneration image renders |
 | `SINGLE_IMAGE_PARALLELISM` | `3` | Max concurrent Single Image Studio renders |
+| `SINGLE_VOICE_PARALLELISM` | `2` | Max concurrent Single Voice Studio renders |
 | `IMAGE_COSTS` | *(table above)* | Per-image USD price by resolution × quality |
 | `PROMPT_GENERATION_FLAT_COST` | `1.00` | Flat per-project overhead added to cost preview |
 | `MAX_RETRIES` | `3` | Retry attempts per image |

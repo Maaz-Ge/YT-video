@@ -15,8 +15,12 @@ services:
       EXPORT_FFMPEG_WORKERS: "8"
       TZ: UTC
     volumes:
-      # Persist all generated projects on the host (same folder you used with python app.py)
+      # Persist all generated data on the host (survives image rebuilds / container recreation)
       - ./projects:/app/projects
+      # Standalone Single Image studio output
+      - ./singles:/app/singles
+      # Standalone Single Voice studio output
+      - ./voices:/app/voices
     healthcheck:
       test:
         [

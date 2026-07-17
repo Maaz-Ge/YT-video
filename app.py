@@ -1546,6 +1546,122 @@ def _single_public(rec: dict) -> dict:
     return out
 
 
+# ─── Single-voice studio (standalone, script → one ElevenLabs narration) ─────
+
+_voices_lock = threading.Lock()
+_voice_executor_lock = threading.Lock()
+_voice_executor: ThreadPoolExecutor | None = None
+
+
+def _get_voice_executor() -> ThreadPoolExecutor:
+    global _voice_executor
+    with _voice_executor_lock:
+        if _voice_executor is None:
+            _voice_executor = ThreadPoolExecutor(
+                max_workers=max(1, int(config.SINGLE_VOICE_PARALLELISM)),
+                thread_name_prefix="voice",
+            )
+        return _voice_executor
+
+
+def _voices_path() -> Path:
+    return config.VOICES_DIR / "voices.json"
+
+
+def _load_voices() -> list[dict]:
+    p = _voices_path()
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def _save_voices(records: list[dict]) -> None:
+    try:
+        _voices_path().write_text(json.dumps(records, indent=2), encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to persist voices.json")
+
+
+def _update_voice_record(voice_id: str, **fields) -> dict | None:
+    """Read-modify-write a single voice record under the voices lock."""
+    with _voices_lock:
+        records = _load_voices()
+        for rec in records:
+            if rec.get("id") == voice_id:
+                rec.update(fields)
+                rec["updated_at"] = time.time()
+                _save_voices(records)
+                return dict(rec)
+    return None
+
+
+def _run_voice_job(voice_id: str) -> None:
+    """Worker: render one standalone voice-over from its script."""
+    with _voices_lock:
+        records = _load_voices()
+        rec = next((r for r in records if r.get("id") == voice_id), None)
+        if rec is None:
+            return
+        script = rec.get("script") or ""
+        speed = float(rec.get("speed") or config.DEFAULT_VOICE_SPEED)
+
+    _update_voice_record(voice_id, status="generating", voice_done=0)
+
+    def on_progress(done: int, total: int) -> None:
+        _update_voice_record(voice_id, voice_total=total, voice_done=done)
+
+    voice_dir = config.VOICES_DIR / voice_id
+    try:
+        info = voice_engine.generate_voice_with_timestamps(
+            script=script,
+            project_dir=voice_dir,
+            speed=speed,
+            on_progress=on_progress,
+        )
+        _update_voice_record(
+            voice_id,
+            status="done",
+            audio_filename=info.get("filename"),
+            audio_path=info.get("path"),
+            duration_seconds=info.get("duration_seconds"),
+            chunks=info.get("chunks"),
+            sentence_count=info.get("sentence_count"),
+            voice_model_id=info.get("model_id"),
+            error=None,
+        )
+    except Exception as exc:
+        logger.error("Single voice %s failed: %s", voice_id, exc, exc_info=True)
+        _update_voice_record(voice_id, status="error", error=str(exc))
+
+
+def _voice_public(rec: dict) -> dict:
+    """Client-facing view of a voice record (adds stream/download URLs)."""
+    script = rec.get("script", "")
+    out = {
+        "id": rec.get("id"),
+        "script": script,
+        "speed": rec.get("speed"),
+        "status": rec.get("status", "pending"),
+        "error": rec.get("error"),
+        "duration_seconds": rec.get("duration_seconds"),
+        "chunks": rec.get("chunks"),
+        "sentence_count": rec.get("sentence_count"),
+        "voice_total": rec.get("voice_total"),
+        "voice_done": rec.get("voice_done"),
+        "created_at": rec.get("created_at"),
+        "updated_at": rec.get("updated_at"),
+    }
+    if rec.get("status") == "done" and rec.get("audio_filename"):
+        out["audio_url"] = f"/voices/{rec['id']}/audio"
+        out["download_url"] = f"/voices/{rec['id']}/download"
+    return out
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -2018,6 +2134,117 @@ def download_single_image(filename: str):
         mimetype="image/png",
         as_attachment=True,
         download_name=Path(filename).name,
+    )
+
+
+# ─── Single-voice studio routes ──────────────────────────────────────────────
+
+def _voice_audio_path(voice_id: str) -> Path | None:
+    """Resolve the WAV path for a done voice record (guards against traversal)."""
+    with _voices_lock:
+        records = _load_voices()
+        rec = next((r for r in records if r.get("id") == voice_id), None)
+    if rec is None or rec.get("status") != "done":
+        return None
+    rel = rec.get("audio_path") or "voiceovers/full_voiceover.wav"
+    path = (config.VOICES_DIR / voice_id / str(rel).replace("\\", "/")).resolve()
+    base = (config.VOICES_DIR / voice_id).resolve()
+    if base not in path.parents or not path.exists():
+        return None
+    return path
+
+
+@app.route("/api/voices", methods=["GET"])
+def api_list_voices():
+    """List all standalone voice-overs (newest first) + queue parallelism info."""
+    with _voices_lock:
+        records = _load_voices()
+    records.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+    items = [_voice_public(r) for r in records]
+    active = sum(1 for r in records if r.get("status") in ("pending", "generating"))
+    return jsonify(
+        {
+            "voices": items,
+            "active_count": active,
+            "max_parallel": int(config.SINGLE_VOICE_PARALLELISM),
+        }
+    )
+
+
+@app.route("/api/voices", methods=["POST"])
+def api_create_voice():
+    """Queue a standalone voice-over. Up to SINGLE_VOICE_PARALLELISM run in parallel."""
+    data = request.get_json(silent=True) or {}
+    script = (data.get("script") or "").strip()
+    speed = _parse_voice_speed(data.get("speed", config.DEFAULT_VOICE_SPEED))
+
+    if not config.ELEVEN_API_KEY:
+        return jsonify({"error": "ELEVEN_API_KEY is required to generate voice-overs."}), 400
+    if not script:
+        return jsonify({"error": "Script is required."}), 400
+
+    voice_id = uuid.uuid4().hex
+    now = time.time()
+    record = {
+        "id": voice_id,
+        "script": script,
+        "speed": speed,
+        "status": "pending",
+        "audio_filename": None,
+        "audio_path": None,
+        "duration_seconds": None,
+        "chunks": None,
+        "sentence_count": None,
+        "voice_total": None,
+        "voice_done": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _voices_lock:
+        records = _load_voices()
+        records.append(record)
+        _save_voices(records)
+
+    _get_voice_executor().submit(_run_voice_job, voice_id)
+    return jsonify({"ok": True, "voice": _voice_public(record)})
+
+
+@app.route("/api/voices/<voice_id>", methods=["DELETE"])
+def api_delete_voice(voice_id: str):
+    """Remove a voice record and its per-voice directory."""
+    with _voices_lock:
+        records = _load_voices()
+        rec = next((r for r in records if r.get("id") == voice_id), None)
+        if rec is None:
+            abort(404)
+        kept = [r for r in records if r.get("id") != voice_id]
+        _save_voices(kept)
+
+    voice_dir = config.VOICES_DIR / voice_id
+    if voice_dir.exists():
+        shutil.rmtree(voice_dir, ignore_errors=True)
+    return jsonify({"ok": True})
+
+
+@app.route("/voices/<voice_id>/audio")
+def serve_voice_audio(voice_id: str):
+    path = _voice_audio_path(voice_id)
+    if path is None:
+        abort(404)
+    return send_file(path, mimetype="audio/wav", conditional=True)
+
+
+@app.route("/voices/<voice_id>/download")
+def download_voice_audio(voice_id: str):
+    path = _voice_audio_path(voice_id)
+    if path is None:
+        abort(404)
+    return send_file(
+        path,
+        mimetype="audio/wav",
+        as_attachment=True,
+        download_name=f"voiceover_{voice_id}.wav",
     )
 
 

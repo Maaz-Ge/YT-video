@@ -91,6 +91,10 @@
         <span class="studio-mode-tab-title">Single Image</span>
         <span class="studio-mode-tab-sub">One prompt → one image</span>
       </button>
+      <button type="button" class="studio-mode-tab" data-mode="voice" role="tab" aria-selected="false">
+        <span class="studio-mode-tab-title">Single Voice</span>
+        <span class="studio-mode-tab-sub">Script → one narration clip</span>
+      </button>
     </div>
 
     <div id="mode-batch">
@@ -566,6 +570,78 @@
         <div class="single-gallery" id="single-gallery"></div>
       </div>
     </div><!-- /#mode-single -->
+
+    <!-- ── Single Voice studio ─────────────────────────────────────────────── -->
+    <div id="mode-voice" hidden>
+      <div class="single-studio animate-fade-up">
+        <form id="voice-form" class="create-form single-form" novalidate>
+
+          <div class="form-group">
+            <div class="form-label-row">
+              <label class="form-label" for="voice_script">Voice-over Script</label>
+              <button type="button" class="info-btn"
+                data-tip="Paste the full narration you want spoken. It is rendered as one combined WAV via ElevenLabs — long scripts are chunked and stitched automatically, exactly like the batch pipeline. No images are generated here.">
+                ⓘ How voice generation works
+              </button>
+            </div>
+            <textarea
+              id="voice_script"
+              name="voice_script"
+              class="form-textarea"
+              rows="8"
+              placeholder="Paste your narration script here…"
+              required
+            ></textarea>
+            <p class="single-note">Standalone narration only — no images. Produces one combined WAV clip.</p>
+          </div>
+
+          <div class="timing-section voice-speed-section">
+            <div class="form-label-row">
+              <p class="form-label">Narration speed</p>
+              <button type="button" class="info-btn"
+                data-tip="How fast the voice reads your script.&#10;&#10;1.0 = normal pace&#10;0.75 = slightly slower&#10;0.5 = half speed (longer clip)&#10;0.25 = slowest allowed">
+                ⓘ About narration speed
+              </button>
+            </div>
+            <div class="timing-field timing-field--full">
+              <label class="timing-label" for="single_voice_speed">
+                Speaking pace
+                <span class="timing-unit">0.25 slow · 1.0 normal</span>
+              </label>
+              <div class="slider-row">
+                <input type="range" id="single_voice_speed_slider" min="0.25" max="1" step="0.05" value="1" class="range-slider" />
+                <input type="number" id="single_voice_speed" name="single_voice_speed" min="0.25" max="1" step="0.05" value="1" class="range-number range-number--wide" />
+              </div>
+              <p class="timing-hint" id="single-voice-speed-hint">Normal pace — matches typical documentary narration</p>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-submit" id="voice-submit-btn">
+            <span id="voice-submit-label">Generate Voice-over</span>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M3 9h12M11 5l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="voice-submit-spinner" class="spinner hidden"></span>
+          </button>
+
+          <p class="single-queue-info" id="voice-queue-info" hidden>
+            <span id="voice-active-count">0</span> generating ·
+            up to <span id="voice-max-parallel">2</span> render in parallel — the rest queue automatically.
+          </p>
+        </form>
+      </div>
+
+      <div class="single-gallery-wrap">
+        <div class="single-gallery-header">
+          <p class="section-label">Your voice-overs</p>
+          <h3 class="single-gallery-title">Generated voice clips</h3>
+        </div>
+        <p class="single-gallery-empty" id="voice-gallery-empty">
+          No voice-overs yet. Paste a script above and generate your first one.
+        </p>
+        <div class="voice-gallery" id="voice-gallery"></div>
+      </div>
+    </div><!-- /#mode-voice -->
 
   </div>
 </section>

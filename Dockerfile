@@ -18,8 +18,10 @@ COPY engine/ ./engine/
 COPY templates/ ./templates/
 COPY static/ ./static/
 
-# projects/ is created at runtime; mount a host volume here in production
-RUN mkdir -p /app/projects
+# These are created at runtime too; mount host volumes here in production so
+# generated data (projects, standalone single images, standalone voices) survives
+# image rebuilds and container recreation.
+RUN mkdir -p /app/projects /app/singles /app/voices
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

@@ -19,6 +19,7 @@ This document explains how each major subsystem fits together end-to-end: data m
 | `static/js/app.js` | Form handling, polling, grid sync, regenerate modal, export download, combined voice-over player sync. |
 | `projects/<id>/` | Per-project folder: `meta.json`, `status.json`, `scenes.json`, `timing.json`, `images/`, `voiceovers/`. |
 | `singles/` | Standalone **Single Image Studio** store (separate from projects): `singles.json` + `images/`. See §15. |
+| `voices/` | Standalone **Single Voice Studio** store (separate from projects): `voices.json` + `<voice_id>/`. See §16. |
 
 ---
 
@@ -282,6 +283,11 @@ ZIP contents:
 | GET | `/singles/images/<filename>` | Serve a single-image PNG. |
 | GET | `/singles/previews/<filename>` | Serve a single-image JPEG preview. |
 | GET | `/singles/download/<filename>` | Download a single image (attachment). |
+| POST | `/api/voices` | Queue a standalone voice-over (see §16). |
+| GET | `/api/voices` | List voice-overs (newest first) + `{active_count, max_parallel}`. |
+| DELETE | `/api/voices/<voice_id>` | Delete one voice record + its `<voice_id>/` dir. |
+| GET | `/voices/<voice_id>/audio` | Stream a voice-over WAV. |
+| GET | `/voices/<voice_id>/download` | Download a voice-over (attachment). |
 
 ---
 
@@ -305,6 +311,7 @@ ZIP contents:
 - The regeneration `ThreadPoolExecutor` is process-global; it's reused across requests via a guarded `_get_regen_executor()` (lazy init under `_regen_executor_lock`).
 - Initial-generation image renders still go through `engine.pipeline.generate_all_images()`'s own `ThreadPoolExecutor(MAX_WORKERS)`. The two pools are independent.
 - The Single Image Studio uses a **third**, independent process-global pool via `_get_single_executor()` (`SINGLE_IMAGE_PARALLELISM` workers). Read-modify-write on `singles.json` is guarded by `_singles_lock`.
+- The Single Voice Studio uses a **fourth** independent pool via `_get_voice_executor()` (`SINGLE_VOICE_PARALLELISM` workers). Read-modify-write on `voices.json` is guarded by `_voices_lock`. All four pools are independent.
 
 ---
 
@@ -318,6 +325,7 @@ ZIP contents:
 - `OPENAI_TEXT_MODEL`, `IMAGE_MODEL` override defaults (`config.py`).
 - `REGEN_PARALLELISM` (default `4`) — max concurrent regeneration image renders.
 - `SINGLE_IMAGE_PARALLELISM` (default `3`) — max concurrent Single Image Studio renders (see §15).
+- `SINGLE_VOICE_PARALLELISM` (default `2`) — max concurrent Single Voice Studio renders (see §16).
 - `WORDS_PER_MINUTE` (default `150`) — **preview only**. The real duration comes from the measured voice-over; this constant just powers the pre-generation scene-count + cost estimate.
 - `IMAGE_COSTS` and `PROMPT_GENERATION_FLAT_COST` — pricing inputs for the cost preview (voice-over cost is governed by your ElevenLabs plan and is not included in this estimate).
 - `.env` is loaded from this package directory or sibling `image_generator/.env`.
@@ -333,6 +341,7 @@ ZIP contents:
 - Regeneration jobs that fail mid-flight leave the new variant row with `image_status="error"`; the user can delete the failed variant. The combined voice-over is project-level, so regenerating an image never touches the audio.
 - Export ZIPs live in the system temp directory and are auto-cleaned 30 min after the job finishes.
 - A Single Image blocked by content policy is left with `status="error"` and the error message; nothing is auto-rewritten (see §15).
+- A Single Voice render with no `ELEVEN_API_KEY`, missing ffmpeg, or a failed ElevenLabs chunk is left with `status="error"` and the message (see §16).
 
 ---
 
@@ -398,5 +407,70 @@ read-modify-write under `_singles_lock`.
   Each done card shows the preview image, a `View image prompt` `<details>` dropdown
   (reusing `.scene-prompt-details`), and Download / Delete; a click on the image
   opens the shared lightbox.
+
+---
+
+## 16. Single Voice Studio (standalone)
+
+A self-contained one-off **voice-over** generator. It reuses the *exact* batch
+voice engine — `engine.voice.generate_voice_with_timestamps()` — so ElevenLabs
+settings, sentence chunking, `/with-timestamps` calls, and ffmpeg concat into one
+combined WAV are identical to the batch pipeline. No images, scenes, or timeline.
+
+### Storage
+
+`config.VOICES_DIR` (`voices/`, a sibling of `projects/`, not inside it):
+
+```
+voices/
+  voices.json                    # array of records (source of truth, persisted)
+  <voice_id>/
+    voiceovers/full_voiceover.wav
+    sentence_timeline.json       # written by the shared voice engine
+```
+
+Each render gets its own `<voice_id>/` directory, which is passed to the voice
+engine as its `project_dir` (the engine writes `voiceovers/` + `sentence_timeline.json`
+under it, exactly as for a batch project).
+
+### Record model (`voices.json`)
+
+| Field | Meaning |
+|-------|---------|
+| `id` | UUID hex; primary key + directory name. |
+| `script` | Full narration text. |
+| `speed` | ElevenLabs narration speed 0.25–1.0 (clamped by `_parse_voice_speed`). |
+| `status` | `pending` → `generating` → `done` / `error`. |
+| `voice_total`, `voice_done` | Live chunk progress during generation. |
+| `audio_filename`, `audio_path` | `full_voiceover.wav` / `voiceovers/full_voiceover.wav` once done. |
+| `duration_seconds`, `chunks`, `sentence_count` | Filled from the engine result. |
+| `error` | Populated on failure. |
+| `created_at`, `updated_at` | Wall-clock timestamps (list served newest-first). |
+
+### Flow
+
+```
+POST /api/voices → append pending record → submit _run_voice_job to
+_get_voice_executor() (SINGLE_VOICE_PARALLELISM workers)
+  → status=generating (voice_done/voice_total updated per chunk via on_progress)
+  → voice_engine.generate_voice_with_timestamps(script, project_dir=voices/<id>, speed)
+  → status=done (+ audio_path, duration, chunks)  |  status=error (+ error)
+```
+
+`_update_voice_record()` performs each read-modify-write under `_voices_lock`.
+`ELEVEN_API_KEY` is required (POST is rejected with 400 otherwise); ffmpeg is
+required by the shared engine. Audio is served from `_voice_audio_path()`, which
+resolves the WAV under the voice dir and guards against path traversal.
+
+### Frontend (`static/js/app.js` → `initSingleVoiceStudio`)
+
+- The landing-page tab switch (`initStudioModeTabs`, now generalised to N panels)
+  toggles `#mode-batch` / `#mode-single` / `#mode-voice`.
+- `pollVoices()` polls `GET /api/voices` on an adaptive interval — fast while any
+  record is `pending`/`generating` (showing `Chunk X of Y…`), stops when idle.
+- `renderVoicesGallery()` reconciles cards by `id`; **done cards are not
+  re-rendered**, so an inline `<audio>` player keeps its playback state across
+  polling refreshes. Each done card has the audio player, a `View script`
+  `<details>` dropdown, duration/chunk/speed tags, and Download / Delete.
 
 This should be enough for a new engineer to trace any request from the browser → JSON stores → worker threads → OpenAI APIs → filesystem.

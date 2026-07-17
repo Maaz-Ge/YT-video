@@ -9,8 +9,10 @@ __pycache__/
 # Secrets (pass via env_file / -e at runtime)
 .env
 
-# Generated data (mount as a volume on the server)
+# Generated data (mounted as volumes on the server)
 projects/
+singles/
+voices/
 
 # Dev-only
 testcodes/

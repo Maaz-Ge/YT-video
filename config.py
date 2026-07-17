@@ -54,6 +54,7 @@ IMAGE_SAFETY_MAX_RETRIES: int = int(os.getenv("IMAGE_SAFETY_MAX_RETRIES", "5"))
 EXPORT_FFMPEG_WORKERS: int = int(os.getenv("EXPORT_FFMPEG_WORKERS", "6"))
 REGEN_PARALLELISM: int = int(os.getenv("REGEN_PARALLELISM", "3"))
 SINGLE_IMAGE_PARALLELISM: int = int(os.getenv("SINGLE_IMAGE_PARALLELISM", "3"))
+SINGLE_VOICE_PARALLELISM: int = int(os.getenv("SINGLE_VOICE_PARALLELISM", "2"))
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 PROJECTS_DIR: Path = Path(__file__).parent / "projects"
@@ -63,6 +64,11 @@ PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 # PROJECTS_DIR so it never appears in the project list or the generation lock.
 SINGLES_DIR: Path = Path(__file__).parent / "singles"
 SINGLES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Standalone single-voice studio (script → one combined ElevenLabs narration).
+# Same directory-isolation rationale as SINGLES_DIR.
+VOICES_DIR: Path = Path(__file__).parent / "voices"
+VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Pricing (USD) ────────────────────────────────────────────────────────────
 IMAGE_COSTS: dict = {

@@ -4,7 +4,7 @@ This replaces running `python app.py` inside **tmux** on the server. Docker give
 
 - **ffmpeg** and Python deps baked into the image (no manual `apt install` / `pip install` on the server)
 - **Auto-restart** if the process crashes (`restart: unless-stopped`)
-- **Same data** — your existing `projects/` folder is mounted into the container
+- **Same data** — your `projects/`, `singles/`, and `voices/` folders are mounted into the container
 
 ---
 
@@ -16,7 +16,7 @@ This replaces running `python app.py` inside **tmux** on the server. Docker give
 | Docker Engine | Install once (see Step 1) |
 | Docker Compose plugin | Usually included with modern Docker |
 | Your `.env` file | Must contain `OPENAI_API_KEY=...` |
-| Your `projects/` folder | All generated videos/images stay here on disk |
+| Your `projects/`, `singles/`, `voices/` folders | All generated projects, standalone images, and standalone voice-overs stay here on disk |
 
 You **do not** need a Python venv on the server anymore for this app (only Docker).
 
@@ -94,8 +94,12 @@ ls -la
    nano .env   # paste OPENAI_API_KEY=sk-...
    ```
 
-2. **`projects/`** — Must stay on the host. Docker mounts `./projects` → `/app/projects` inside the container.  
-   **Do not delete this folder** when switching to Docker.
+2. **`projects/`, `singles/`, `voices/`** — Must stay on the host. Docker mounts
+   `./projects` → `/app/projects`, `./singles` → `/app/singles`, and
+   `./voices` → `/app/voices` inside the container.  
+   **Do not delete these folders** when switching to Docker — they hold all your
+   generated batch projects, standalone single images, and standalone voice-overs.
+   (They are created automatically on first run if missing.)
 
 ---
 
@@ -179,7 +183,7 @@ docker compose build --no-cache   # only if dependencies/Dockerfile changed
 docker compose up -d
 ```
 
-Your `projects/` data is **not** inside the image — it stays on disk via the volume mount.
+Your `projects/`, `singles/`, and `voices/` data is **not** inside the image — it stays on disk via the volume mounts.
 
 ---
 
@@ -260,13 +264,23 @@ docker compose exec scene-studio ffmpeg -version
 
 If missing, rebuild: `docker compose build --no-cache && docker compose up -d`
 
-### Projects disappeared
+### Projects / single images / voices disappeared
 
-They are only on the host if the volume mount is correct. Check:
+They are only on the host if the volume mounts are correct. Check each:
 
 ```bash
-ls -la ./projects
-docker compose exec scene-studio ls -la /app/projects
+ls -la ./projects ./singles ./voices
+docker compose exec scene-studio ls -la /app/projects /app/singles /app/voices
+```
+
+If `singles/` or `voices/` reset after a rebuild, your `docker-compose.yml` is
+missing their volume lines:
+
+```yaml
+    volumes:
+      - ./projects:/app/projects
+      - ./singles:/app/singles
+      - ./voices:/app/voices
 ```
 
 Both should list the same project IDs.

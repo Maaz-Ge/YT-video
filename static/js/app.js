@@ -1795,11 +1795,20 @@ function initSingleImageStudio() {
   pollSingles();
 }
 
+let _studioModeTabsReady = false;
+
 function initStudioModeTabs() {
-  const tabs = document.querySelectorAll(".studio-mode-tab");
-  const batch = document.getElementById("mode-batch");
-  const single = document.getElementById("mode-single");
-  if (!tabs.length || !batch || !single) return;
+  if (_studioModeTabsReady) return;
+  const tabs = Array.from(document.querySelectorAll(".studio-mode-tab"));
+  if (!tabs.length) return;
+
+  const panels = new Map();
+  tabs.forEach((tab) => {
+    const mode = tab.getAttribute("data-mode");
+    const panel = document.getElementById(`mode-${mode}`);
+    if (panel) panels.set(mode, panel);
+  });
+  if (!panels.size) return;
 
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -1809,11 +1818,12 @@ function initStudioModeTabs() {
         t.classList.toggle("active", on);
         t.setAttribute("aria-selected", on ? "true" : "false");
       });
-      const isSingle = mode === "single";
-      batch.hidden = isSingle;
-      single.hidden = !isSingle;
+      panels.forEach((panel, key) => {
+        panel.hidden = key !== mode;
+      });
     });
   });
+  _studioModeTabsReady = true;
 }
 
 function getSingleResolution() {
@@ -2007,6 +2017,244 @@ function closeSingleLightbox() {
   if (img) img.src = "";
 }
 
+/* ── Single Voice studio ──────────────────────────────────────────────────── */
+
+let _voicesPollTimer = null;
+
+function initSingleVoiceStudio() {
+  const form = document.getElementById("voice-form");
+  const gallery = document.getElementById("voice-gallery");
+  if (!form || !gallery) return;
+
+  initStudioModeTabs();
+  initVoiceSpeedControl();
+
+  const submitBtn = document.getElementById("voice-submit-btn");
+  const spinner = document.getElementById("voice-submit-spinner");
+  const label = document.getElementById("voice-submit-label");
+  const scriptEl = document.getElementById("voice_script");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const script = (scriptEl.value || "").trim();
+    if (!script) {
+      showToast("Paste a script to generate a voice-over.", "error");
+      return;
+    }
+    const speed = getSingleVoiceSpeed();
+
+    if (submitBtn) submitBtn.disabled = true;
+    if (spinner) spinner.classList.remove("hidden");
+    if (label) label.textContent = "Adding to queue…";
+
+    try {
+      const res = await fetch("/api/voices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script, speed }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Voice request failed");
+      showToast("Added to the voice queue.", "ok", 3500);
+      scriptEl.value = "";
+      pollVoices();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+
+    if (submitBtn) submitBtn.disabled = false;
+    if (spinner) spinner.classList.add("hidden");
+    if (label) label.textContent = "Generate Voice-over";
+  });
+
+  gallery.addEventListener("click", (e) => {
+    const del = e.target.closest(".btn-delete-voice");
+    if (del) deleteVoice(del.dataset.id);
+  });
+
+  pollVoices();
+}
+
+function initVoiceSpeedControl() {
+  const slider = document.getElementById("single_voice_speed_slider");
+  const number = document.getElementById("single_voice_speed");
+  const hint = document.getElementById("single-voice-speed-hint");
+  if (!slider || !number) return;
+
+  function updateHint(v) {
+    if (!hint) return;
+    if (v >= 0.95) hint.textContent = "Normal pace — matches typical documentary narration";
+    else if (v >= 0.7) hint.textContent = "Slightly slower — more deliberate delivery";
+    else if (v >= 0.45) hint.textContent = "Slow — noticeably longer clip";
+    else hint.textContent = "Very slow — longest clip";
+  }
+
+  slider.addEventListener("input", () => {
+    number.value = slider.value;
+    updateHint(parseFloat(slider.value));
+  });
+  number.addEventListener("input", () => {
+    let v = parseFloat(number.value);
+    if (isNaN(v)) return;
+    v = Math.max(0.25, Math.min(1, v));
+    slider.value = v;
+    updateHint(v);
+  });
+  updateHint(parseFloat(number.value) || 1);
+}
+
+function getSingleVoiceSpeed() {
+  const el = document.getElementById("single_voice_speed");
+  if (!el) return 1.0;
+  let v = parseFloat(el.value);
+  if (isNaN(v)) v = 1.0;
+  return Math.max(0.25, Math.min(1, v));
+}
+
+async function pollVoices() {
+  const gallery = document.getElementById("voice-gallery");
+  if (!gallery) return;
+  clearTimeout(_voicesPollTimer);
+
+  try {
+    const res = await fetch("/api/voices");
+    if (!res.ok) {
+      _voicesPollTimer = setTimeout(pollVoices, 8000);
+      return;
+    }
+    const data = await res.json();
+    const voices = data.voices || [];
+    renderVoicesGallery(voices);
+    updateVoiceQueueInfo(data);
+
+    const busy = voices.some((v) => v.status === "pending" || v.status === "generating");
+    if (busy) _voicesPollTimer = setTimeout(pollVoices, 3000);
+  } catch (e) {
+    _voicesPollTimer = setTimeout(pollVoices, 8000);
+  }
+}
+
+function updateVoiceQueueInfo(data) {
+  const info = document.getElementById("voice-queue-info");
+  const activeEl = document.getElementById("voice-active-count");
+  const maxEl = document.getElementById("voice-max-parallel");
+  if (!info) return;
+  const active = data.active_count || 0;
+  if (activeEl) activeEl.textContent = active;
+  if (maxEl && data.max_parallel) maxEl.textContent = data.max_parallel;
+  info.hidden = active === 0;
+}
+
+function renderVoicesGallery(voices) {
+  const gallery = document.getElementById("voice-gallery");
+  const empty = document.getElementById("voice-gallery-empty");
+  if (!gallery) return;
+
+  if (empty) empty.hidden = voices.length > 0;
+
+  const existing = new Map();
+  gallery.querySelectorAll(".voice-card").forEach((node) => {
+    existing.set(node.dataset.id, node);
+  });
+
+  const wanted = new Set(voices.map((v) => v.id));
+  existing.forEach((node, id) => {
+    if (!wanted.has(id)) node.remove();
+  });
+
+  voices.forEach((v) => {
+    let node = existing.get(v.id);
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "voice-card";
+      node.dataset.id = v.id;
+      gallery.appendChild(node);
+    } else if (node.dataset.status === "done" && v.status === "done") {
+      // Already rendered — don't rewrite so the <audio> player keeps its state.
+      return;
+    }
+    updateVoiceCard(node, v);
+  });
+
+  voices.forEach((v) => {
+    const node = gallery.querySelector(`.voice-card[data-id="${CSS.escape(v.id)}"]`);
+    if (node) gallery.appendChild(node);
+  });
+}
+
+function updateVoiceCard(node, v) {
+  const status = v.status || "pending";
+  node.dataset.status = status;
+
+  let media;
+  if (status === "done" && v.audio_url) {
+    media = `<audio class="voice-card-audio" controls preload="none" src="${escapeAttr(v.audio_url)}"></audio>`;
+  } else if (status === "error") {
+    media = `<div class="voice-card-status voice-card-status--error">${escapeHTML(v.error || "Voice generation failed")}</div>`;
+  } else {
+    const prog =
+      v.voice_total
+        ? `Chunk ${v.voice_done || 0} of ${v.voice_total}…`
+        : status === "generating"
+          ? "Generating…"
+          : "Queued…";
+    media = `<div class="voice-card-status voice-card-status--pending"><span class="spinner"></span><span>${escapeHTML(prog)}</span></div>`;
+  }
+
+  const meta = [];
+  if (status === "done") {
+    if (v.duration_seconds != null) meta.push(fmtTime(v.duration_seconds));
+    if (v.chunks != null) meta.push(`${v.chunks} chunk${v.chunks === 1 ? "" : "s"}`);
+  }
+  if (v.speed != null) meta.push(`speed ${Number(v.speed).toFixed(2)}`);
+
+  const actions = `
+    <div class="single-card-actions">
+      ${
+        status === "done" && v.download_url
+          ? `<a class="btn btn-ghost btn-sm" href="${escapeAttr(v.download_url)}" download>Download</a>`
+          : ""
+      }
+      <button type="button" class="btn btn-ghost btn-sm btn-delete-voice" data-id="${escapeAttr(v.id)}">Delete</button>
+    </div>`;
+
+  const script = v.script || "";
+
+  node.innerHTML = `
+    <div class="voice-card-media">${media}</div>
+    <div class="single-card-body">
+      <div class="single-card-meta">
+        ${meta.map((m) => `<span class="single-card-tag">${escapeHTML(m)}</span>`).join("")}
+      </div>
+      <details class="scene-prompt-details single-prompt-details">
+        <summary class="scene-prompt-toggle">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          View script
+        </summary>
+        <div class="scene-prompt-body">
+          <p class="scene-prompt-text">${escapeHTML(script)}</p>
+        </div>
+      </details>
+      ${actions}
+    </div>`;
+}
+
+async function deleteVoice(id) {
+  if (!id) return;
+  if (!confirm("Delete this voice-over?")) return;
+  try {
+    const res = await fetch(`/api/voices/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Delete failed");
+    const node = document.querySelector(`.voice-card[data-id="${CSS.escape(id)}"]`);
+    if (node) node.remove();
+    pollVoices();
+  } catch (e) {
+    showToast("Delete failed.", "error");
+  }
+}
+
 /* ── Bootstrap ────────────────────────────────────────────────────────────── */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -2014,6 +2262,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initCreateForm();
   initHomePage();
   initSingleImageStudio();
+  initSingleVoiceStudio();
   initProjectPage();
   initDeleteButton();
 
