@@ -22,6 +22,9 @@
       </div>
       <div class="project-meta-chips">
         <span class="chip chip--style">◈ {{ project.style }}</span>
+        {% if pipeline_type == 'freeform' %}
+          <span class="chip chip--pipeline">Freeform batch</span>
+        {% endif %}
         <span class="chip chip--ratio">{{ project.aspect_ratio }}</span>
         <span class="chip chip--quality">{{ project.quality }}</span>
         {% if project.resolution %}
@@ -68,9 +71,29 @@
         <!-- Settings grid -->
         <div class="proj-settings-grid">
           <div class="proj-setting">
-            <span class="proj-setting-label">Style</span>
-            <span class="proj-setting-value">{{ project.style }}</span>
+            <span class="proj-setting-label">Style / pipeline</span>
+            <span class="proj-setting-value">{{ project.style }}{% if pipeline_type == 'freeform' %} · freeform{% endif %}</span>
           </div>
+          {% if pipeline_type == 'freeform' and project.special_instructions %}
+          <div class="proj-setting proj-setting--wide">
+            <span class="proj-setting-label">Special instructions</span>
+            <span class="proj-setting-value">{{ project.special_instructions }}</span>
+          </div>
+          {% endif %}
+          {% if pipeline_type == 'freeform' and project.reference_style_summary %}
+          <div class="proj-setting proj-setting--wide">
+            <span class="proj-setting-label">Reference style</span>
+            <span class="proj-setting-value">{{ project.reference_style_summary }}</span>
+          </div>
+          {% endif %}
+          {% if pipeline_type == 'freeform' and project.reference_image_path %}
+          <div class="proj-setting">
+            <span class="proj-setting-label">Reference image</span>
+            <span class="proj-setting-value">
+              <a href="/projects/{{ project.id }}/reference/{{ project.reference_image_path.split('/')[-1] }}" target="_blank" rel="noopener">View</a>
+            </span>
+          </div>
+          {% endif %}
           <div class="proj-setting">
             <span class="proj-setting-label">Quality</span>
             <span class="proj-setting-value">{{ project.quality | capitalize }}</span>
@@ -496,8 +519,18 @@
   <div class="modal-card">
     <h3>Regenerate image</h3>
     <p class="modal-hint">
+      {% if pipeline_type == 'freeform' %}
+      Describe what to change. The model merges your note with the previous prompt
+      {% if project.special_instructions or project.reference_style_summary %}
+      while keeping your freeform instructions / reference style consistent
+      {% else %}
+      without injecting a fixed brand style guide
+      {% endif %}.
+      {% else %}
       Describe what to change. The model merges your note with the previous prompt while preserving the
-      documentary / Tatterveil style. You can queue several regenerations at once — up to
+      documentary / Tatterveil style.
+      {% endif %}
+      You can queue several regenerations at once — up to
       <span id="regen-modal-parallel">{{ regen_parallelism }}</span> images render in parallel; the rest wait.
     </p>
     <p class="regen-modal-target" id="regen-modal-target"></p>
@@ -552,6 +585,7 @@
   window.SCENE_TYPE_COLORS = {{ scene_type_colors | tojson }};
   window.PERIOD_LABELS     = {{ period_labels | tojson }};
   window.REGEN_PARALLELISM = {{ regen_parallelism }};
+  window.PIPELINE_TYPE     = {{ (pipeline_type or 'tatterveil') | tojson }};
   window.VOICEOVER         = {{ (voiceover or none) | tojson }};
 </script>
 {% endblock %}

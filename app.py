@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+import mimetypes
 import shutil
 import wave
 import subprocess
@@ -29,7 +30,7 @@ from flask import (
 )
 
 import config
-from engine import pipeline, voice as voice_engine
+from engine import freeform, pipeline, voice as voice_engine
 from engine import thumbnails
 from engine.scene_utils import (
     count_variants_for_slot,
@@ -278,10 +279,12 @@ def _list_projects() -> list[dict]:
             if meta:
                 plan = meta.get("scene_plan") or {}
                 step = state.get("step", "unknown") if state else "unknown"
+                pipeline_type = meta.get("pipeline_type") or "tatterveil"
                 projects.append({
                     "id": d.name,
                     "name": meta.get("name", "Untitled"),
                     "style": meta.get("style", "Tatterveil"),
+                    "pipeline_type": pipeline_type,
                     "quality": meta.get("quality", "medium"),
                     "total_scenes": plan.get("total_scenes")
                     or (state.get("total_scenes") if state else 0)
@@ -425,15 +428,49 @@ def _run_generation(project_id: str, meta: dict) -> None:
 
         # ── Step 5: Enrich each scene + generate prompts ─────────────────────
         step_start = time.monotonic()
-        _set_state(project_id, step="prompting", progress=44,
-                   message="Generating visual prompts for each scene…")
+        pipeline_type = meta.get("pipeline_type") or "tatterveil"
 
-        scenes = pipeline.split_and_prompt(
-            title=meta["name"],
-            script=script,
-            scene_plan=scene_plan,
-            pre_segments=pre_segments,
-        )
+        if pipeline_type == "freeform":
+            # Optional reference → style brief (before prompt generation).
+            ref_rel = meta.get("reference_image_path")
+            style_brief = (meta.get("reference_style_summary") or "").strip()
+            if ref_rel and not style_brief:
+                _set_state(
+                    project_id, step="prompting", progress=43,
+                    message="Extracting visual style from reference image…",
+                )
+                ref_path = project_dir / str(ref_rel).replace("\\", "/")
+                style_info = freeform.extract_style_from_reference(ref_path)
+                style_brief = style_info.get("style_summary") or ""
+                meta["reference_style_summary"] = style_brief
+                meta["reference_style_keywords"] = style_info.get("style_keywords") or []
+                _meta_path(project_id).write_text(
+                    json.dumps(meta, indent=2), encoding="utf-8"
+                )
+
+            _set_state(
+                project_id, step="prompting", progress=44,
+                message="Generating freeform visual prompts for each scene…",
+            )
+            scenes = freeform.split_and_prompt_freeform(
+                title=meta["name"],
+                script=script,
+                scene_plan=scene_plan,
+                pre_segments=pre_segments,
+                special_instructions=meta.get("special_instructions"),
+                style_from_reference=style_brief or None,
+            )
+        else:
+            _set_state(
+                project_id, step="prompting", progress=44,
+                message="Generating visual prompts for each scene…",
+            )
+            scenes = pipeline.split_and_prompt(
+                title=meta["name"],
+                script=script,
+                scene_plan=scene_plan,
+                pre_segments=pre_segments,
+            )
         scenes = ensure_scene_entries(scenes)
 
         timing_log["prompt_seconds"] = round(time.monotonic() - step_start, 2)
@@ -1337,9 +1374,10 @@ def _run_regen_job(job_id: str) -> None:
             _, base = hit
             slot = int(base.get("slot_number") or base.get("scene_number") or 0)
 
+        is_freeform = (meta.get("pipeline_type") or "tatterveil") == "freeform"
+
         if is_blocked_recovery:
             # Skip LLM refinement — user's description becomes the prompt directly.
-            # Wrap it with the mandatory style anchors to keep render quality consistent.
             _update_regen_job(
                 job_id,
                 status="running",
@@ -1347,10 +1385,13 @@ def _run_regen_job(job_id: str) -> None:
                 slot_number=slot,
                 stage_message="Using your description as the new prompt…",
             )
-            new_prompt = pipeline.build_safe_replacement_prompt(
-                user_description=instructions,
-                scene=base,
-            )
+            if is_freeform:
+                new_prompt = freeform.build_safe_replacement_prompt_freeform(instructions)
+            else:
+                new_prompt = pipeline.build_safe_replacement_prompt(
+                    user_description=instructions,
+                    scene=base,
+                )
             new_neg = base.get("negative_prompt")
         else:
             _update_regen_job(
@@ -1363,12 +1404,22 @@ def _run_regen_job(job_id: str) -> None:
 
             # LLM prompt refinement happens *outside* the scene lock so multiple
             # workers can call the text model in parallel.
-            new_prompt, new_neg = pipeline.refine_prompt_for_regeneration(
-                previous_prompt=base.get("prompt") or "",
-                previous_negative=base.get("negative_prompt"),
-                script_segment=base.get("script_segment") or "",
-                user_instructions=instructions,
-            )
+            if is_freeform:
+                new_prompt, new_neg = freeform.refine_prompt_freeform(
+                    previous_prompt=base.get("prompt") or "",
+                    previous_negative=base.get("negative_prompt"),
+                    script_segment=base.get("script_segment") or "",
+                    user_instructions=instructions,
+                    special_instructions=meta.get("special_instructions"),
+                    style_from_reference=meta.get("reference_style_summary"),
+                )
+            else:
+                new_prompt, new_neg = pipeline.refine_prompt_for_regeneration(
+                    previous_prompt=base.get("prompt") or "",
+                    previous_negative=base.get("negative_prompt"),
+                    script_segment=base.get("script_segment") or "",
+                    user_instructions=instructions,
+                )
 
         # Append the new variant row under the scene lock so concurrent regens
         # don't collide on variant_index or filename.
@@ -1783,6 +1834,133 @@ def api_generate():
     return jsonify({"project_id": project_id})
 
 
+def _save_freeform_reference(project_dir: Path, file_storage) -> str:
+    """
+    Persist an uploaded reference image under project_dir/reference/.
+    Returns a project-relative path (posix). Raises ValueError on bad input.
+    """
+    if file_storage is None or not getattr(file_storage, "filename", None):
+        raise ValueError("No reference image provided.")
+
+    original = Path(file_storage.filename).name
+    ext = Path(original).suffix.lower()
+    if ext not in config.FREEFORM_REF_ALLOWED_EXT:
+        raise ValueError(
+            f"Unsupported reference image type. Allowed: "
+            f"{', '.join(config.FREEFORM_REF_ALLOWED_EXT)}"
+        )
+
+    data = file_storage.read()
+    if not data:
+        raise ValueError("Reference image file is empty.")
+    if len(data) > int(config.FREEFORM_REF_MAX_BYTES):
+        mb = int(config.FREEFORM_REF_MAX_BYTES) / (1024 * 1024)
+        raise ValueError(f"Reference image too large (max {mb:.0f} MB).")
+
+    ref_dir = project_dir / "reference"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    dest = ref_dir / f"reference{ext}"
+    dest.write_bytes(data)
+    return dest.relative_to(project_dir).as_posix()
+
+
+@app.route("/api/generate-freeform", methods=["POST"])
+def api_generate_freeform():
+    """
+    Create a freeform batch project (no Tatterveil style guide).
+
+    Accepts JSON or multipart form. Optional fields:
+      special_instructions — creative direction for prompt generation
+      reference_image — uploaded image file (multipart only)
+    """
+    if request.content_type and "multipart/form-data" in request.content_type:
+        data = request.form
+        ref_file = request.files.get("reference_image")
+    else:
+        data = request.get_json(silent=True) or {}
+        ref_file = None
+
+    name = (data.get("name") or "Untitled").strip()
+    script = (data.get("script") or "").strip()
+    aspect_ratio = data.get("aspect_ratio", "16:9")
+    quality = data.get("quality", config.DEFAULT_QUALITY)
+    resolution = data.get("resolution", config.DEFAULT_RESOLUTION)
+    first_rate = int(data.get("first_rate", 3))
+    rest_rate = int(data.get("rest_rate", 2))
+    voice_speed = _parse_voice_speed(data.get("voice_speed", config.DEFAULT_VOICE_SPEED))
+    special_instructions = (data.get("special_instructions") or "").strip()
+
+    if not config.ELEVEN_API_KEY:
+        return jsonify({"error": "ELEVEN_API_KEY is required for voice-over and timestamps."}), 400
+    if not script:
+        return jsonify({"error": "Script is required."}), 400
+    if len(script.split()) < 10:
+        return jsonify({"error": "Script is too short. Please provide more content."}), 400
+    if quality not in config.QUALITY_OPTIONS:
+        return jsonify({"error": f"Invalid quality. Choose: {list(config.QUALITY_OPTIONS)}"}), 400
+    if resolution not in config.RESOLUTION_PRESETS:
+        return jsonify({"error": f"Invalid resolution. Choose: {list(config.RESOLUTION_PRESETS)}"}), 400
+    first_rate = max(1, min(first_rate, 10))
+    rest_rate = max(1, min(rest_rate, 10))
+
+    active = _find_active_generation()
+    if active:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Another project is still generating. "
+                        "Wait for it to finish or open it from Recent Projects."
+                    ),
+                    "active_project_id": active["id"],
+                    "active_project_name": active.get("name"),
+                    "progress": active.get("progress"),
+                }
+            ),
+            409,
+        )
+
+    project_id = uuid.uuid4().hex
+    project_dir = config.PROJECTS_DIR / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    reference_image_path = None
+    if ref_file and getattr(ref_file, "filename", None):
+        try:
+            reference_image_path = _save_freeform_reference(project_dir, ref_file)
+        except ValueError as exc:
+            shutil.rmtree(project_dir, ignore_errors=True)
+            return jsonify({"error": str(exc)}), 400
+
+    meta = {
+        "id": project_id,
+        "name": name,
+        "script": script,
+        "style": "Freeform",
+        "pipeline_type": "freeform",
+        "aspect_ratio": aspect_ratio,
+        "quality": quality,
+        "resolution": resolution,
+        "first_rate": first_rate,
+        "rest_rate": rest_rate,
+        "voice_speed": voice_speed,
+        "special_instructions": special_instructions or None,
+        "reference_image_path": reference_image_path,
+        "reference_style_summary": None,
+        "reference_style_keywords": None,
+        "created_at": time.time(),
+        "scene_plan": {},
+    }
+    _meta_path(project_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _set_state(project_id, step="queued", progress=0,
+               message="Freeform project queued. Starting generation…")
+
+    thread = threading.Thread(target=_run_generation, args=(project_id, meta), daemon=True)
+    thread.start()
+
+    return jsonify({"project_id": project_id})
+
+
 @app.route("/api/projects/<project_id>/status")
 def api_status(project_id: str):
     """Polling endpoint: returns current generation status + available scenes."""
@@ -1895,7 +2073,19 @@ def project_view(project_id: str):
         scene_type_names=SCENE_TYPE_NAMES,
         scene_type_colors=SCENE_TYPE_COLORS,
         period_labels=PERIOD_LABELS,
+        pipeline_type=meta.get("pipeline_type") or "tatterveil",
     )
+
+
+@app.route("/projects/<project_id>/reference/<filename>")
+def serve_project_reference(project_id: str, filename: str):
+    """Serve an uploaded freeform reference image (if present)."""
+    safe = Path(filename).name
+    path = config.PROJECTS_DIR / project_id / "reference" / safe
+    if not path.exists():
+        abort(404)
+    mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    return send_file(path, mimetype=mime, conditional=True)
 
 
 @app.route("/projects/<project_id>/images/<filename>")

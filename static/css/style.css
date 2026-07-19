@@ -2640,3 +2640,40 @@ body.body-lock { overflow: hidden; }
   text-align: center;
 }
 .voice-card-status--error { color: var(--clr-err); }
+
+/* ── Freeform Batch studio ───────────────────────────────────────────────── */
+.ff-intro {
+  max-width: 42rem;
+  color: var(--text-2);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  margin: 0 0 var(--sp-lg);
+}
+.optional-tag {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 0.35rem;
+}
+.form-file {
+  padding: 0.55rem 0.75rem;
+  cursor: pointer;
+}
+.form-file::file-selector-button {
+  margin-right: 0.75rem;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-2);
+  color: var(--text-1);
+  border-radius: var(--r-sm);
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
+  font-family: var(--ff-body);
+  font-size: 0.8rem;
+}
+.proj-setting--wide { grid-column: 1 / -1; }
+.chip--pipeline {
+  border-color: var(--teal-light);
+  color: var(--teal-light);
+}

@@ -62,6 +62,7 @@ YT-video/
 │   ├── scene_utils.py   Stable `entry_id`s, PNG/MP3 filenames, duplicate-slot detection
 │   ├── style_guide.py   Full Tatterveil style guide encoded as Python constants
 │   │                    + the LLM system prompt used for scene splitting
+│   ├── freeform.py      Style-free batch prompts + reference-image style extract / refine
 │   ├── pipeline.py      Core generation engine (scene grouping + prompts + images + safety retry)
 │   └── voice.py         ElevenLabs /with-timestamps → combined WAV + sentence timeline
 │
@@ -298,6 +299,36 @@ Single images live in their own `singles/` directory, completely separate from
 
 ---
 
+## Freeform Batch (style-free scene pipeline)
+
+A fourth studio mode — same end-to-end batch pipeline as Tatterveil
+(**script → voice + timestamps → scene split → prompts → parallel images →
+regenerate / ZIP export**), but **without** the hardcoded Tatterveil style guide.
+
+On the Studio page choose **Freeform Batch**. Provide:
+
+- **Script**, narration speed, scene rates, resolution, quality — same as Tatterveil batch
+- **Special instructions** *(optional)* — creative direction for prompt writing across
+  all scenes (camera angles, mix of close-ups / wides, mood, etc.)
+- **Reference image** *(optional)* — uploaded still; GPT extracts a visual style brief
+  that is applied consistently to every scene prompt
+
+Prompt behaviour:
+
+| Special instructions | Reference image | Resulting image prompt |
+|----------------------|-----------------|------------------------|
+| empty | none | Exactly that scene’s `script_segment` (image model interprets freely) |
+| set | optional | LLM builds prompts from script + instructions (+ style brief if present) |
+| optional | set | Style brief extracted first, then prompts stay consistent with it |
+
+Voice chunking/concat, scene timing, image workers, regeneration queue, and ZIP export
+are shared with Tatterveil batch. Freeform projects store `pipeline_type: "freeform"`
+in `meta.json` and live in the same `projects/` folder (already Docker-persisted).
+
+Create via `POST /api/generate-freeform` (JSON or multipart with `reference_image`).
+
+---
+
 ## Single Voice Studio (standalone)
 
 A separate generator for one-off **voice-overs only** — no images, no scenes, no
@@ -389,7 +420,8 @@ Click any completed scene image (or its **Enlarge** button) to open a full-scree
 | `GET` | `/` | Landing page + recent projects list |
 | `POST` | `/api/estimate` | Live scene-count + **cost** estimate (JSON) |
 | `GET` | `/api/pricing` | Raw pricing table (`image_costs`, `prompt_overhead_usd`) |
-| `POST` | `/api/generate` | Create project + start background generation |
+| `POST` | `/api/generate` | Create Tatterveil batch project + start background generation |
+| `POST` | `/api/generate-freeform` | Create freeform batch project (optional instructions + reference image) |
 | `GET` | `/api/projects/<id>/status` | Polling: step, scenes, duplicate slots, `export_blocked`, `regeneration_jobs[]`, `cost_estimate`, `cost_actual` |
 | `POST` | `/api/projects/<id>/exports` | Start a progress-aware ZIP export job |
 | `GET` | `/api/projects/<id>/exports/<job_id>` | Poll export progress (stage, percent, current/total) |
@@ -476,6 +508,7 @@ The system enforces all of the following on every generated image:
 | `REGEN_PARALLELISM` | `4` | Max concurrent regeneration image renders |
 | `SINGLE_IMAGE_PARALLELISM` | `3` | Max concurrent Single Image Studio renders |
 | `SINGLE_VOICE_PARALLELISM` | `2` | Max concurrent Single Voice Studio renders |
+| `FREEFORM_REF_MAX_BYTES` | `10485760` | Max upload size for freeform reference images (10 MB) |
 | `IMAGE_COSTS` | *(table above)* | Per-image USD price by resolution × quality |
 | `PROMPT_GENERATION_FLAT_COST` | `1.00` | Flat per-project overhead added to cost preview |
 | `MAX_RETRIES` | `3` | Retry attempts per image |

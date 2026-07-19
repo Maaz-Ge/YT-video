@@ -56,6 +56,10 @@ REGEN_PARALLELISM: int = int(os.getenv("REGEN_PARALLELISM", "3"))
 SINGLE_IMAGE_PARALLELISM: int = int(os.getenv("SINGLE_IMAGE_PARALLELISM", "3"))
 SINGLE_VOICE_PARALLELISM: int = int(os.getenv("SINGLE_VOICE_PARALLELISM", "2"))
 
+# Freeform batch (style-free pipeline) — reference image upload limits
+FREEFORM_REF_MAX_BYTES: int = int(os.getenv("FREEFORM_REF_MAX_BYTES", str(10 * 1024 * 1024)))
+FREEFORM_REF_ALLOWED_EXT: tuple = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
 # ── Storage ───────────────────────────────────────────────────────────────────
 PROJECTS_DIR: Path = Path(__file__).parent / "projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)

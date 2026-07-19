@@ -87,6 +87,10 @@
         <span class="studio-mode-tab-title">Batch Generation</span>
         <span class="studio-mode-tab-sub">Script → timed Tatterveil scenes</span>
       </button>
+      <button type="button" class="studio-mode-tab" data-mode="freeform" role="tab" aria-selected="false">
+        <span class="studio-mode-tab-title">Freeform Batch</span>
+        <span class="studio-mode-tab-sub">Script → scenes, no style guide</span>
+      </button>
       <button type="button" class="studio-mode-tab" data-mode="single" role="tab" aria-selected="false">
         <span class="studio-mode-tab-title">Single Image</span>
         <span class="studio-mode-tab-sub">One prompt → one image</span>
@@ -437,6 +441,227 @@
     </div><!-- /form-layout -->
 
     </div><!-- /#mode-batch -->
+
+    <!-- ── Freeform Batch studio ───────────────────────────────────────────── -->
+    <div id="mode-freeform" hidden>
+      <div
+        id="ff-generation-locked-banner"
+        class="generation-locked-banner animate-fade-up"
+        {% if not generation_locked %}hidden{% endif %}
+      >
+        <div class="generation-locked-inner">
+          <span class="generation-locked-text" id="ff-generation-locked-text">
+            {% if active_generation %}
+            <strong>{{ active_generation.name }}</strong> is generating
+            (<span id="ff-generation-locked-pct">{{ active_generation.progress }}</span>%).
+            Finish it before starting another project.
+            {% else %}
+            A project is currently generating. Finish it before starting another.
+            {% endif %}
+          </span>
+          <a
+            href="{% if active_generation %}/projects/{{ active_generation.id }}{% else %}#projects{% endif %}"
+            class="btn btn-sm"
+            id="ff-generation-locked-link"
+          >Open in-progress project</a>
+        </div>
+      </div>
+
+      <p class="section-label animate-fade-up" style="margin-top:0.5rem">Freeform Batch</p>
+      <h2 class="section-title animate-fade-up">Generate scenes without a style guide</h2>
+      <p class="ff-intro animate-fade-up">
+        Same voice → scene-split → image pipeline as Tatterveil batch, but prompts are
+        driven only by your script — plus optional special instructions and/or a
+        reference image for style consistency.
+      </p>
+
+      <div class="form-layout animate-fade-up">
+        <form id="freeform-form" class="create-form" enctype="multipart/form-data" novalidate>
+          <div class="form-group">
+            <label class="form-label" for="ff_name">Video Title</label>
+            <input type="text" id="ff_name" name="name" class="form-input"
+              placeholder="e.g. Product launch storyboard" maxlength="120" required />
+          </div>
+
+          <div class="form-group">
+            <div class="form-label-row">
+              <label class="form-label" for="ff_script">Narration Script</label>
+              <button type="button" class="info-btn"
+                data-tip="Same as batch: we generate one combined voice-over first, then split scenes from real timestamps. No Tatterveil style is applied to the images.">
+                ⓘ
+              </button>
+            </div>
+            <textarea id="ff_script" name="script" class="form-textarea" rows="10"
+              placeholder="Paste your full narration script here…" required></textarea>
+          </div>
+
+          <div class="form-group">
+            <div class="form-label-row">
+              <label class="form-label" for="ff_special_instructions">Special instructions <span class="optional-tag">optional</span></label>
+              <button type="button" class="info-btn"
+                data-tip="Creative direction for prompt writing across ALL scenes — e.g. camera angles, mix of close-ups and wides, color mood, lighting. Leave blank to use each scene's script text as the image prompt.">
+                ⓘ
+              </button>
+            </div>
+            <textarea id="ff_special_instructions" name="special_instructions" class="form-textarea" rows="4"
+              placeholder="e.g. Cinematic teal-orange grade; alternate wide establishing shots and extreme close-ups of hands/details; shallow depth of field on close-ups…"></textarea>
+            <p class="single-note">If empty (and no reference image), each image prompt is just that scene’s script text.</p>
+          </div>
+
+          <div class="form-group">
+            <div class="form-label-row">
+              <label class="form-label" for="ff_reference_image">Reference image <span class="optional-tag">optional</span></label>
+              <button type="button" class="info-btn"
+                data-tip="Upload a still. We ask GPT to extract a visual style brief (lighting, color, texture, mood) and apply that look consistently to every scene prompt.">
+                ⓘ
+              </button>
+            </div>
+            <input type="file" id="ff_reference_image" name="reference_image" class="form-input form-file"
+              accept="image/png,image/jpeg,image/webp,image/gif" />
+            <p class="single-note" id="ff-ref-preview-name">No file selected.</p>
+          </div>
+
+          <div class="config-row">
+            <div class="form-group form-group--sm">
+              <label class="form-label">Aspect Ratio</label>
+              <div class="locked-badge">
+                <span class="locked-icon">⬛</span>
+                16 : 9
+                <span class="locked-tag">only</span>
+              </div>
+              <input type="hidden" name="aspect_ratio" value="16:9" />
+            </div>
+          </div>
+
+          <div class="config-row">
+            <div class="form-group form-group--lg">
+              <label class="form-label">Resolution</label>
+              <div class="resolution-selector" role="radiogroup" aria-label="Resolution">
+                <label class="res-option">
+                  <input type="radio" name="ff_resolution" value="1280x720" />
+                  <span class="res-label">
+                    <span class="res-tier">HD</span>
+                    <span class="res-size">1280×720</span>
+                    <span class="res-note">Fastest</span>
+                  </span>
+                </label>
+                <label class="res-option">
+                  <input type="radio" name="ff_resolution" value="2048x1152" checked />
+                  <span class="res-label">
+                    <span class="res-tier">2K</span>
+                    <span class="res-size">2048×1152</span>
+                    <span class="res-note">Balanced</span>
+                  </span>
+                </label>
+                <label class="res-option">
+                  <input type="radio" name="ff_resolution" value="3840x2160" />
+                  <span class="res-label">
+                    <span class="res-tier">4K Ultra</span>
+                    <span class="res-size">3840×2160</span>
+                    <span class="res-note">Highest detail</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+            <div class="form-group form-group--sm">
+              <label class="form-label">Quality</label>
+              <div class="quality-selector" role="radiogroup" aria-label="Quality">
+                <label class="quality-option">
+                  <input type="radio" name="ff_quality" value="low" />
+                  <span class="quality-label">
+                    <span class="quality-name">Low</span>
+                    <span class="quality-detail">Draft</span>
+                  </span>
+                </label>
+                <label class="quality-option">
+                  <input type="radio" name="ff_quality" value="medium" checked />
+                  <span class="quality-label">
+                    <span class="quality-name">Medium</span>
+                    <span class="quality-detail">Balanced</span>
+                  </span>
+                </label>
+                <label class="quality-option">
+                  <input type="radio" name="ff_quality" value="high" />
+                  <span class="quality-label">
+                    <span class="quality-name">High</span>
+                    <span class="quality-detail">Best</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="timing-section voice-speed-section">
+            <p class="form-label">Narration speed</p>
+            <div class="timing-field timing-field--full">
+              <label class="timing-label" for="ff_voice_speed">
+                Speaking pace
+                <span class="timing-unit">0.25 slow · 1.0 normal</span>
+              </label>
+              <div class="slider-row">
+                <input type="range" id="ff_voice_speed_slider" min="0.25" max="1" step="0.05" value="1" class="range-slider" />
+                <input type="number" id="ff_voice_speed" name="voice_speed" min="0.25" max="1" step="0.05" value="1" class="range-number range-number--wide" />
+              </div>
+            </div>
+          </div>
+
+          <div class="timing-section">
+            <p class="form-label">Scene Timing</p>
+            <div class="timing-grid">
+              <div class="timing-field">
+                <label class="timing-label" for="ff_first_rate">
+                  First 5 minutes
+                  <span class="timing-unit">scenes / min</span>
+                </label>
+                <div class="slider-row">
+                  <input type="range" id="ff_first_rate_slider" min="1" max="8" value="3" class="range-slider" />
+                  <input type="number" id="ff_first_rate" name="first_rate" min="1" max="8" value="3" class="range-number" />
+                </div>
+              </div>
+              <div class="timing-field">
+                <label class="timing-label" for="ff_rest_rate">
+                  Remaining duration
+                  <span class="timing-unit">scenes / min</span>
+                </label>
+                <div class="slider-row">
+                  <input type="range" id="ff_rest_rate_slider" min="1" max="8" value="2" class="range-slider" />
+                  <input type="number" id="ff_rest_rate" name="rest_rate" min="1" max="8" value="2" class="range-number" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-submit" id="ff-submit-btn"
+            {% if generation_locked %}disabled aria-disabled="true"{% endif %}>
+            <span id="ff-submit-label">Generate Freeform Scenes</span>
+            <svg id="ff-submit-icon" width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M3 9h12M11 5l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="ff-submit-spinner" class="spinner hidden"></span>
+          </button>
+        </form>
+
+        <aside class="estimate-panel">
+          <div class="estimate-header">Freeform notes</div>
+          <div class="estimate-how">
+            <p class="estimate-how-text">
+              Voice, scene timing, parallel image rendering, regeneration queue, and ZIP
+              export work like Tatterveil batch. Only the <strong>style / prompt layer</strong>
+              is different.
+            </p>
+          </div>
+          <div class="style-preview">
+            <p class="style-preview-label">Prompt behaviour</p>
+            <ul class="style-preview-list">
+              <li>No hardcoded style guide</li>
+              <li>Optional special instructions</li>
+              <li>Optional reference → style brief</li>
+              <li>Else: prompt = scene script only</li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </div><!-- /#mode-freeform -->
 
     <!-- ── Single Image studio ─────────────────────────────────────────────── -->
     <div id="mode-single" hidden>

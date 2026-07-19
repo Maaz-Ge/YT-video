@@ -11,6 +11,7 @@ This document explains how each major subsystem fits together end-to-end: data m
 | `app.py` | Flask app: routes, persisted `status.json`, scene CRUD, ZIP export, regenerate worker orchestration, voice-over stage. |
 | `config.py` | Environment variables, paths (`PROJECTS_DIR`), model names, quality/resolution presets, ElevenLabs settings. |
 | `engine/pipeline.py` | Scene plan → sentence-aligned grouping (LLM + time-balanced fallback) → LLM enrichment/prompt → parallel image generation with content-policy retry → prompt refinement for regeneration. |
+| `engine/freeform.py` | Style-free batch prompting: optional reference-image style extract + freeform scene prompts / refine (see §17). |
 | `engine/voice.py` | ElevenLabs **eleven_v3** `/with-timestamps`: sentence chunks → MP3 + character alignment → ffmpeg concat → WAV + `sentence_timeline.json`. |
 | `engine/transcribe.py` | Legacy module; `split_script_sentences()` is reused by voice. Not used in the production pipeline. |
 | `engine/style_guide.py` | Tatterveil rules and the **system** prompt for scene enrichment + image prompt generation. |
@@ -265,7 +266,8 @@ ZIP contents:
 |--------|------|---------|
 | POST | `/api/estimate` | Scene-count estimate + cost (`{ ...plan, cost: {...} }`). |
 | GET | `/api/pricing` | Raw pricing table for UI consumers. |
-| POST | `/api/generate` | New project + start `_run_generation` thread. |
+| POST | `/api/generate` | New **Tatterveil** batch project + start `_run_generation` thread. |
+| POST | `/api/generate-freeform` | New **freeform** batch project (optional `special_instructions` + `reference_image`). See §17. |
 | GET | `/api/projects/<id>/status` | Poll: `step`, `progress`, `scenes[]`, `duplicate_slots`, `export_blocked`, `regeneration_jobs[]`, `regeneration{...}`, `cost_estimate`, `cost_actual`, `voiceover{status,url,duration_seconds,chunks}`. |
 | GET | `/projects/<id>/voiceovers/<filename>` | Stream the combined voice-over audio (`full_voiceover.wav`). |
 | POST | `/api/projects/<id>/exports` | Start a progress-aware ZIP export job. |
@@ -465,12 +467,70 @@ resolves the WAV under the voice dir and guards against path traversal.
 ### Frontend (`static/js/app.js` → `initSingleVoiceStudio`)
 
 - The landing-page tab switch (`initStudioModeTabs`, now generalised to N panels)
-  toggles `#mode-batch` / `#mode-single` / `#mode-voice`.
+  toggles `#mode-batch` / `#mode-freeform` / `#mode-single` / `#mode-voice`.
 - `pollVoices()` polls `GET /api/voices` on an adaptive interval — fast while any
   record is `pending`/`generating` (showing `Chunk X of Y…`), stops when idle.
 - `renderVoicesGallery()` reconciles cards by `id`; **done cards are not
   re-rendered**, so an inline `<audio>` player keeps its playback state across
   polling refreshes. Each done card has the audio player, a `View script`
   `<details>` dropdown, duration/chunk/speed tags, and Download / Delete.
+
+---
+
+## 17. Freeform Batch (style-free scene pipeline)
+
+Same orchestration as Tatterveil batch (`_run_generation` in `app.py`) — voice,
+sentence timeline, scene plan, image generation, regeneration queue, ZIP export —
+but **prompt enrichment does not use** `SCENE_SPLIT_SYSTEM_PROMPT` / Tatterveil rules.
+
+### Identity
+
+`meta.pipeline_type = "freeform"` (existing projects without the field default to
+`"tatterveil"`). Display `style` is `"Freeform"`. Data still lives under
+`projects/<id>/` (same Docker volume as batch).
+
+Optional meta fields:
+
+| Field | Meaning |
+|-------|---------|
+| `special_instructions` | User creative direction for prompt writing (may be null/empty). |
+| `reference_image_path` | e.g. `reference/reference.png` if uploaded. |
+| `reference_style_summary` | Filled during generation by vision LLM. |
+| `reference_style_keywords` | Optional keyword list from the same extract. |
+
+### Branch inside `_run_generation`
+
+All steps through voice + `build_scene_segments_from_sentences` are shared.
+At the prompting step:
+
+1. If `reference_image_path` is set and no summary yet →
+   `freeform.extract_style_from_reference()` (GPT vision) → persist summary on meta.
+2. `freeform.split_and_prompt_freeform(...)`:
+   - **No** instructions **and** **no** style brief → each scene’s `prompt` =
+     `script_segment` (no LLM prompt-writer call).
+   - Otherwise → LLM builds per-scene prompts that obey instructions / style
+     consistently across the set (still locked timings/text).
+
+Images still go through `pipeline.generate_all_images` / `generate_image`
+(including safety rewrite on policy blocks).
+
+### API
+
+`POST /api/generate-freeform` — JSON or `multipart/form-data`.
+Multipart field `reference_image` is saved under `projects/<id>/reference/`.
+Shares the same one-active-batch-generation lock as `/api/generate`.
+
+`GET /projects/<id>/reference/<filename>` serves the uploaded reference.
+
+### Regeneration
+
+`_run_regen_job` checks `meta.pipeline_type`. Freeform uses
+`freeform.refine_prompt_freeform` / `build_safe_replacement_prompt_freeform`
+(no Tatterveil style anchors). Queue parallelism and variant rows are unchanged.
+
+### Frontend
+
+Studio tab `data-mode="freeform"` → `#mode-freeform` form (`initFreeformForm` in
+`app.js`). Project page shows freeform chips / instructions / reference style when present.
 
 This should be enough for a new engineer to trace any request from the browser → JSON stores → worker threads → OpenAI APIs → filesystem.

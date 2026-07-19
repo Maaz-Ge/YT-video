@@ -1333,9 +1333,12 @@ function openRegenerateModal(entryId, slotLabel, isBlocked) {
     target.textContent = slotLabel ? `Target: scene slot ${slotLabel}` : "";
   }
   if (hint) {
+    const freeform = window.PIPELINE_TYPE === "freeform";
     hint.textContent = isBlocked
       ? "This image was blocked by OpenAI's content policy. Describe a completely safe visual replacement — avoid any sensitive wording. Your description will be used to generate the new image."
-      : "Describe what you want changed — the AI will refine the prompt while keeping the scene's style and era.";
+      : freeform
+        ? "Describe what you want changed — the AI will refine the prompt without injecting a fixed brand style guide."
+        : "Describe what you want changed — the AI will refine the prompt while keeping the scene's style and era.";
     hint.className = isBlocked ? "regen-hint regen-hint--blocked" : "regen-hint";
   }
   if (label) {
@@ -1537,23 +1540,32 @@ function applyProjectsFilter() {
 }
 
 function applyGenerationLock(locked, active) {
-  const banner = document.getElementById("generation-locked-banner");
-  const submitBtn = document.getElementById("submit-btn");
-  const layout = document.querySelector(".form-layout");
-  const pctEl = document.getElementById("generation-locked-pct");
-  const link = document.getElementById("generation-locked-link");
+  const banners = [
+    ["generation-locked-banner", "generation-locked-pct", "generation-locked-link"],
+    ["ff-generation-locked-banner", "ff-generation-locked-pct", "ff-generation-locked-link"],
+  ];
+  banners.forEach(([bannerId, pctId, linkId]) => {
+    const banner = document.getElementById(bannerId);
+    if (banner) banner.hidden = !locked;
+    if (locked && active) {
+      const pctEl = document.getElementById(pctId);
+      const link = document.getElementById(linkId);
+      if (pctEl) pctEl.textContent = String(active.progress ?? 0);
+      if (link) link.href = `/projects/${active.id}`;
+    }
+  });
 
-  if (banner) banner.hidden = !locked;
-  if (submitBtn) {
-    submitBtn.disabled = !!locked;
-    submitBtn.setAttribute("aria-disabled", locked ? "true" : "false");
-  }
-  if (layout) layout.classList.toggle("form-layout--locked", !!locked);
+  ["submit-btn", "ff-submit-btn"].forEach((id) => {
+    const submitBtn = document.getElementById(id);
+    if (submitBtn) {
+      submitBtn.disabled = !!locked;
+      submitBtn.setAttribute("aria-disabled", locked ? "true" : "false");
+    }
+  });
 
-  if (locked && active) {
-    if (pctEl) pctEl.textContent = String(active.progress ?? 0);
-    if (link) link.href = `/projects/${active.id}`;
-  }
+  document.querySelectorAll(".form-layout").forEach((layout) => {
+    layout.classList.toggle("form-layout--locked", !!locked);
+  });
 }
 
 function updateProjectCard(card, p) {
@@ -1727,6 +1739,121 @@ function escapeHTML(str) {
 
 function escapeAttr(str) {
   return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/* ── Freeform Batch studio ────────────────────────────────────────────────── */
+
+function initFreeformForm() {
+  const form = document.getElementById("freeform-form");
+  if (!form) return;
+
+  initStudioModeTabs();
+
+  const submitBtn = document.getElementById("ff-submit-btn");
+  const submitLabel = document.getElementById("ff-submit-label");
+  const submitIcon = document.getElementById("ff-submit-icon");
+  const submitSpinner = document.getElementById("ff-submit-spinner");
+  const refInput = document.getElementById("ff_reference_image");
+  const refName = document.getElementById("ff-ref-preview-name");
+
+  function syncPair(sliderId, numberId) {
+    const slider = document.getElementById(sliderId);
+    const number = document.getElementById(numberId);
+    if (!slider || !number) return;
+    slider.addEventListener("input", () => { number.value = slider.value; });
+    number.addEventListener("input", () => {
+      let v = parseFloat(number.value);
+      if (isNaN(v)) return;
+      const min = parseFloat(slider.min);
+      const max = parseFloat(slider.max);
+      v = Math.max(min, Math.min(max, v));
+      slider.value = v;
+    });
+  }
+  syncPair("ff_voice_speed_slider", "ff_voice_speed");
+  syncPair("ff_first_rate_slider", "ff_first_rate");
+  syncPair("ff_rest_rate_slider", "ff_rest_rate");
+
+  if (refInput && refName) {
+    refInput.addEventListener("change", () => {
+      const f = refInput.files && refInput.files[0];
+      refName.textContent = f ? `Selected: ${f.name}` : "No file selected.";
+    });
+  }
+
+  function setSubmitting(busy) {
+    if (!submitBtn) return;
+    if (busy) {
+      if (submitLabel) submitLabel.textContent = "Launching generation…";
+      if (submitIcon) submitIcon.classList.add("hidden");
+      if (submitSpinner) submitSpinner.classList.remove("hidden");
+      submitBtn.disabled = true;
+    } else {
+      if (submitLabel) submitLabel.textContent = "Generate Freeform Scenes";
+      if (submitIcon) submitIcon.classList.remove("hidden");
+      if (submitSpinner) submitSpinner.classList.add("hidden");
+      submitBtn.disabled = false;
+    }
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = (document.getElementById("ff_name")?.value || "").trim();
+    const script = (document.getElementById("ff_script")?.value || "").trim();
+    if (!name) {
+      showToast("Please enter a video title.", "error");
+      return;
+    }
+    if (!script || script.split(/\s+/).length < 10) {
+      showToast("Script is too short — please add more content.", "error");
+      return;
+    }
+
+    const resRadio = form.querySelector('input[name="ff_resolution"]:checked');
+    const qualRadio = form.querySelector('input[name="ff_quality"]:checked');
+    const voiceSpeedEl = document.getElementById("ff_voice_speed");
+    let voiceSpeed = parseFloat(voiceSpeedEl?.value || "1");
+    if (isNaN(voiceSpeed)) voiceSpeed = 1;
+    voiceSpeed = Math.max(0.25, Math.min(1, voiceSpeed));
+
+    const body = new FormData();
+    body.append("name", name);
+    body.append("script", script);
+    body.append("special_instructions", (document.getElementById("ff_special_instructions")?.value || "").trim());
+    body.append("aspect_ratio", "16:9");
+    body.append("resolution", resRadio ? resRadio.value : "2048x1152");
+    body.append("quality", qualRadio ? qualRadio.value : "medium");
+    body.append("voice_speed", String(voiceSpeed));
+    body.append("first_rate", document.getElementById("ff_first_rate")?.value || "3");
+    body.append("rest_rate", document.getElementById("ff_rest_rate")?.value || "2");
+    if (refInput && refInput.files && refInput.files[0]) {
+      body.append("reference_image", refInput.files[0]);
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/generate-freeform", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        showToast(data.error || "Another project is still generating.", "error", 7000);
+        if (data.active_project_id) {
+          setTimeout(() => {
+            window.location.href = `/projects/${data.active_project_id}`;
+          }, 800);
+        }
+        setSubmitting(false);
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || "Generation failed.");
+      showToast("Freeform project created! Redirecting…", "ok", 2000);
+      setTimeout(() => {
+        window.location.href = `/projects/${data.project_id}`;
+      }, 600);
+    } catch (err) {
+      showToast(err.message, "error");
+      setSubmitting(false);
+    }
+  });
 }
 
 /* ── Single Image studio ──────────────────────────────────────────────────── */
@@ -2260,6 +2387,7 @@ async function deleteVoice(id) {
 document.addEventListener("DOMContentLoaded", () => {
   initEstimatePanel();
   initCreateForm();
+  initFreeformForm();
   initHomePage();
   initSingleImageStudio();
   initSingleVoiceStudio();

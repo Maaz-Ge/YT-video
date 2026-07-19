@@ -98,7 +98,9 @@ ls -la
    `./projects` → `/app/projects`, `./singles` → `/app/singles`, and
    `./voices` → `/app/voices` inside the container.  
    **Do not delete these folders** when switching to Docker — they hold all your
-   generated batch projects, standalone single images, and standalone voice-overs.
+   generated batch projects (Tatterveil **and** Freeform, including freeform
+   reference images under `projects/<id>/reference/`), standalone single images,
+   and standalone voice-overs.
    (They are created automatically on first run if missing.)
 
 ---
